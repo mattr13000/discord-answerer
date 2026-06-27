@@ -1,0 +1,5 @@
+streamlit>=1.40
+sentence-transformers>=3.0
+numpy>=1.26
+google-genai>=0.3
+# Backend LLM local (Ollama) : pas de dépendance Python, simple appel HTTP via stdlib.

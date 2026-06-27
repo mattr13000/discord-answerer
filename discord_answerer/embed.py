@@ -1,0 +1,45 @@
+"""Local multilingual embeddings (free, runs on the GPU).
+
+Default model: Qwen/Qwen3-Embedding-0.6B (strong multilingual, incl. Korean).
+Swap to BAAI/bge-m3 by changing `DA_EMBED_MODEL` — nothing else to touch.
+Vectors are L2-normalized -> cosine = plain dot product.
+"""
+
+import numpy as np
+
+from . import config
+
+_model = None
+
+
+def _get_model():
+    global _model
+    if _model is None:
+        # Lazy import: avoids loading torch as long as we only parse.
+        from sentence_transformers import SentenceTransformer
+
+        _model = SentenceTransformer(config.EMBED_MODEL)
+    return _model
+
+
+def _is_instruction_aware() -> bool:
+    return "qwen3-embedding" in config.EMBED_MODEL.lower()
+
+
+def embed_documents(texts: list[str]) -> np.ndarray:
+    model = _get_model()
+    emb = model.encode(
+        texts,
+        batch_size=32,
+        normalize_embeddings=True,
+        show_progress_bar=len(texts) > 256,
+    )
+    return np.asarray(emb, dtype=np.float32)
+
+
+def embed_query(text: str) -> np.ndarray:
+    model = _get_model()
+    if _is_instruction_aware():
+        text = config.QUERY_INSTRUCTION + text
+    emb = model.encode([text], normalize_embeddings=True, show_progress_bar=False)
+    return np.asarray(emb, dtype=np.float32)[0]

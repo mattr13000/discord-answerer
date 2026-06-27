@@ -1,0 +1,23 @@
+# Generated index
+index/
+
+# Discord exports (private data) — keep only the synthetic sample
+data/*.json
+!data/sample_export.json
+exports/
+
+# Python environments & caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Model caches (in case they get redirected into the project)
+.cache/
+
+# Claude Code local/personal settings (shareable settings.json may be tracked)
+.claude/settings.local.json

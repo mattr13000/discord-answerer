@@ -1,0 +1,98 @@
+{
+  "guild": { "id": "111111111111111111", "name": "Aethermoor Private Server" },
+  "channel": { "id": "222222222222222222", "name": "endgame-builds", "category": "Theorycrafting" },
+  "messages": [
+    {
+      "id": "1000000000000000001",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:00:00.000+00:00",
+      "content": "yo what's the consensus on the best end-game build for Stormcaller right now?",
+      "author": { "id": "900000000000000001", "name": "kael", "nickname": "Kael" }
+    },
+    {
+      "id": "1000000000000000002",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:01:30.000+00:00",
+      "content": "crit build is still king at end-game. you stack Shattered Prism (crit chance) + Tempest Core for the multiplier",
+      "author": { "id": "900000000000000002", "name": "vyn", "nickname": "Vyntra" },
+      "reference": { "messageId": "1000000000000000001" }
+    },
+    {
+      "id": "1000000000000000003",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:02:10.000+00:00",
+      "content": "specifically you want 65% crit chance before diminishing returns kick in, then everything goes into crit damage",
+      "author": { "id": "900000000000000002", "name": "vyn", "nickname": "Vyntra" }
+    },
+    {
+      "id": "1000000000000000004",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:03:45.000+00:00",
+      "content": "don't forget the Stormweave set bonus (4pc) — it converts 20% of crit damage into AoE. mandatory for clearing the Sunken Vault",
+      "author": { "id": "900000000000000003", "name": "mira", "nickname": "Mirae" }
+    },
+    {
+      "id": "1000000000000000005",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:05:00.000+00:00",
+      "content": "isn't mana build better for boss sustain though?",
+      "author": { "id": "900000000000000001", "name": "kael", "nickname": "Kael" }
+    },
+    {
+      "id": "1000000000000000006",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:06:20.000+00:00",
+      "content": "mana build fell off after the 2.3 patch. they nerfed Arcane Wellspring by 40%. nobody runs it at end-game anymore",
+      "author": { "id": "900000000000000002", "name": "vyn", "nickname": "Vyntra" }
+    },
+    {
+      "id": "1000000000000000007",
+      "type": "Default",
+      "timestamp": "2024-03-12T18:07:55.000+00:00",
+      "content": "tl;dr best Stormcaller end-game build = crit (Shattered Prism + Tempest Core + Stormweave 4pc), aim 65% crit then crit dmg. Mana build is dead post-2.3.",
+      "author": { "id": "900000000000000003", "name": "mira", "nickname": "Mirae" }
+    },
+    {
+      "id": "1000000000000000008",
+      "type": "Default",
+      "timestamp": "2024-03-12T19:30:00.000+00:00",
+      "content": "perso je joue Frostward en FR et le build tank défensif c'est Glace Éternelle + Rempart Givré, ça tient n'importe quel boss du Vault",
+      "author": { "id": "900000000000000004", "name": "tib", "nickname": "Tibo" }
+    },
+    {
+      "id": "1000000000000000009",
+      "type": "Default",
+      "timestamp": "2024-03-12T19:31:10.000+00:00",
+      "content": "le Frostward crit ça existe mais c'est troll, reste sur le tank défensif pour le PvE end-game",
+      "author": { "id": "900000000000000004", "name": "tib", "nickname": "Tibo" }
+    },
+    {
+      "id": "1000000000000000010",
+      "type": "Default",
+      "timestamp": "2024-03-12T20:15:00.000+00:00",
+      "content": "스톰콜러 엔드게임은 무조건 크리 빌드임. 마나 빌드는 2.3 패치 이후로 버려졌음",
+      "author": { "id": "900000000000000005", "name": "jin", "nickname": "Jinwoo" }
+    },
+    {
+      "id": "1000000000000000011",
+      "type": "Default",
+      "timestamp": "2024-03-12T20:45:00.000+00:00",
+      "content": "where do you farm Shattered Prism? been grinding the Vault for hours and nothing",
+      "author": { "id": "900000000000000001", "name": "kael", "nickname": "Kael" }
+    },
+    {
+      "id": "1000000000000000012",
+      "type": "Default",
+      "timestamp": "2024-03-12T20:46:30.000+00:00",
+      "content": "Shattered Prism only drops from the Sunken Vault final boss on Mythic+ difficulty, ~8% drop rate. not from trash",
+      "author": { "id": "900000000000000003", "name": "mira", "nickname": "Mirae" }
+    },
+    {
+      "id": "1000000000000000013",
+      "type": "Default",
+      "timestamp": "2024-03-12T20:48:00.000+00:00",
+      "content": "Tempest Core is craftable though — 3x Storm Shard + 1x Voidglass at the Aether Forge",
+      "author": { "id": "900000000000000002", "name": "vyn", "nickname": "Vyntra" }
+    }
+  ]
+}
