@@ -29,6 +29,12 @@ _load_dotenv()
 # --- Embeddings (local, free) ---
 # Trivial swap: "Qwen/Qwen3-Embedding-0.6B" (default) <-> "BAAI/bge-m3".
 EMBED_MODEL = os.environ.get("DA_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+# Device for embedding: "" = auto (CUDA if available, else CPU). Force with
+# DA_EMBED_DEVICE=cuda / cpu. GPU is strongly recommended past ~10k messages.
+EMBED_DEVICE = os.environ.get("DA_EMBED_DEVICE", "").strip()
+# Encode batch size. 64 fits comfortably alongside other GPU work on an 8 GB card
+# (model runs in fp16 on CUDA); lower it (e.g. 8-16) if you game while indexing.
+EMBED_BATCH_SIZE = int(os.environ.get("DA_EMBED_BATCH_SIZE", "64"))
 # Qwen3-Embedding is instruction-aware: prefix the QUERY only.
 QUERY_INSTRUCTION = (
     "Instruct: Given a gaming question, retrieve relevant Discord messages "
@@ -41,7 +47,7 @@ CHUNK_OVERLAP_MESSAGES = 3
 CHUNK_TIME_GAP_MINUTES = 30  # split between two distinct conversations
 
 # --- Search ---
-DEFAULT_TOP_K = 30
+DEFAULT_TOP_K = 60  # multi-channel servers dilute the top-k; pull more candidates
 DEFAULT_SCORE_CUTOFF = 0.35  # trims obvious noise; the real anti-hallucination guard is the LLM
 
 # --- LLM backend (synthesis) ---

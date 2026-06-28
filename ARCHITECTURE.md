@@ -22,7 +22,7 @@ flowchart TD
         A["DiscordChatExporter<br/>JSON export"] -->|parse.py| B["normalized messages<br/>(id, ts, author, content, reply_to)"]
         B -->|chunk.py| C["conversation windows<br/>12 msgs, 3 overlap,<br/>split on 30-min gaps"]
         C -->|embed.py<br/>Qwen3-Embedding-0.6B| D["L2-normalized vectors"]
-        D -->|index_build.py| E[("index/&lt;guild&gt;_&lt;channel&gt;/<br/>embeddings.npy<br/>chunks.json + meta.json")]
+        D -->|index_build.py| E[("index/&lt;guild&gt;/&lt;channel&gt;/<br/>embeddings.npy<br/>chunks.json + meta.json")]
     end
 
     subgraph QUERY["❓ Querying — every question"]
@@ -85,7 +85,7 @@ flowchart TD
 | `parse.py` | DiscordChatExporter JSON → normalized messages | `parse_export`, `message_link` |
 | `chunk.py` | Group messages into overlapping conversation windows | `build_chunks` |
 | `embed.py` | Local multilingual embeddings (lazy-imports torch) | `embed_documents`, `embed_query` |
-| `index_build.py` | Build/list/load/delete the per-Discord index library | `build_index`, `list_indexes`, `load_index`, `delete_index` |
+| `index_build.py` | Build the per-channel index; group channels into servers, load & delete | `build_index`, `list_servers`, `load_server`, `load_channel`, `delete_server`, `delete_channel` |
 | `search.py` | Encode query, cosine vs. index, return top-k | `search` |
 | `synthesize.py` | Bounded LLM synthesis (gemini/ollama), the 3 locks | `synthesize`, `build_prompt` |
 
@@ -93,14 +93,18 @@ flowchart TD
 
 ```
 index/                              # gitignored
-  <guild_id>_<channel_id>/          # one folder per ingested Discord
-    embeddings.npy                  #   the vector matrix
-    chunks.json                     #   aligned metadata (one row per vector)
-    meta.json                       #   model, guild/channel, counters
+  <guild_id>/                       # one folder per server (guild)
+    <channel_id>/                   #   one subfolder per channel
+      embeddings.npy                #     the vector matrix
+      chunks.json                   #     aligned metadata (one row per vector)
+      meta.json                     #     model, guild/channel, counters
 ```
 
-`index_build.list_indexes()` auto-migrates a legacy flat index (files directly
-under `index/`) into this per-Discord layout on first call.
+A *server* = the set of channel folders under `index/<guild_id>/`. `load_server`
+`np.vstack`-es the per-channel matrices (no re-embed) and tags each chunk with its
+channel. `index_build.list_servers()` auto-migrates older layouts (files directly
+under `index/`, or flat `index/<guild_id>_<channel_id>/`) into this nested layout
+on first call.
 
 ---
 
@@ -119,9 +123,12 @@ mindmap
       Cross-lingual EN/FR/KR
       Conversation-window chunking
       numpy brute-force cosine
+      Multi-channel server vstack no re-embed
+      Search whole server or one channel
     UX pass non-tech
-      Drag and drop upload
-      Multi-Discord library + sidebar switch
+      Drag and drop multi-file upload
+      Multi-server library + sidebar switch
+      Channel shown on each citation
       In-UI Gemini key entry
       Hover-cards on citations
       Grouped citations Message 1, 2, 3
