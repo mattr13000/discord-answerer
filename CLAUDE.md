@@ -21,12 +21,48 @@ only the retrieved chunks, strict system prompt.
 
 ## Current status (MVP complete & validated)
 Working end-to-end and validated on a real export (Echoes of Morroc, a Ragnarok-like
-private server; 4434 messages -> 846 chunks). Confirmed: Raw retrieval, cross-lingual
-search (EN/FR/KR), Gemini synthesis with `[Message N]` citations, and the "Not found"
-lock (out-of-scope question -> exact fallback). The Streamlit app runs at
-http://localhost:8501. A local `.venv` is set up (Python 3.14, **torch CPU build**); the
-user's `GEMINI_API_KEY` lives in `.env` (gitignored). Default search cutoff = 0.35, but
-the real anti-hallucination guard is the LLM (out-of-scope queries can still score ~0.46).
+private server). The library now holds **4 channels of that server** (#legend 4434,
+#black-plague 2205, #satsujin 1490, #blast-juggler 1169 = 9298 msgs, 1995 chunks total).
+Confirmed: Raw retrieval, cross-lingual search (EN/FR/KR), Gemini synthesis with
+`[Message N]` citations, and the "Not found" lock (out-of-scope question -> exact fallback).
+The Streamlit app runs at
+http://localhost:8501. A local `.venv` is set up (Python 3.14, **torch CUDA build —
+cu126**, GPU active; see Environment); the user's `GEMINI_API_KEY` lives in `.env`
+(gitignored) — or can be pasted directly in the UI. Default search cutoff = 0.35, but the real anti-hallucination guard is the LLM
+(out-of-scope queries can still score ~0.46).
+
+**UX pass done** (non-tech friendly): drag & drop upload of the export (`st.file_uploader`),
+a **multi-server library** (channels grouped per server — see below), in-UI Gemini key
+entry, advanced knobs folded into an expander, plain-language mode labels, and **hover-card
+tooltips** revealing a cited message on hover (over inline `[Message N]` citations and the
+source list).
+
+**Multi-channel done** (backend fully validated; UI not yet browser-tested — see below):
+a *server* groups several channels (one JSON export each, sharing the same `guild.id`).
+Retrieval spans all channels by default (the channel of each cited message is shown), with
+a "Search in" toggle to narrow to one channel. Grouping never re-embeds: `load_server` just
+`np.vstack`-es the already-saved per-channel matrices and tags each chunk with its channel
+(from that channel's `meta.json`) at load time. Multi-file drag & drop indexes several
+channels at once. Default `top_k` raised 30 -> 60 (slider max 100) since merging channels
+dilutes the top-k.
+
+**Committed (branch `ux+limit-test`):** the multi-channel work + the UX pass + `gemini-3.1`
+default are now committed (`a22fa7f`), and `ARCHITECTURE.md` was added (`2b36fcd`). Backend
+was validated by script (migration of the 4 flat indexes -> nested layout,
+`load_server`/`load_channel`, cross-channel search) and the app boots clean headless — but
+**the Streamlit UI itself was NOT clicked through in a browser**. That browser pass + UX
+polish is the next job the user flagged ("du boulot sur l'UI a faire"). Things to eyeball:
+the server selector + per-channel remove buttons, the "Search in" scope radio (whole server
+vs one channel), the multi-file upload progress bar, and the `#channel` tag shown on each
+citation/source.
+
+**In flight / uncommitted (as of 2026-06-28):** **GPU enablement** — torch swapped to the
+cu126 CUDA build and `embed.py` now runs the model on GPU (device auto + fp16, see
+Environment), so indexing big exports (the user's target is a 30k+ msg server) is fast.
+The README got a clear "Requirements" section (local embedding model is mandatory, GPU
+strongly recommended past ~10k msgs) and stale facts fixed (cu124->cu126,
+gemini-2.5->3.1). Plus other working-tree edits to `app.py`/`index_build.py`/`synthesize.py`
+(branch `ux+limit-test`, not yet reviewed here).
 
 ## Architecture
 ```
@@ -35,13 +71,18 @@ discord_answerer/
   config.py                 # everything overridable via env var; loads .env
   parse.py                  # DiscordChatExporter JSON -> normalized messages
   chunk.py                  # conversation windows (NOT 1 embedding/message)
-  embed.py                  # local embeddings (Qwen3-0.6B default, bge-m3 alt)
-  index_build.py            # build/load numpy index (embeddings.npy + chunks.json)
+  embed.py                  # local embeddings (Qwen3-0.6B default, bge-m3 alt); device auto (CUDA+fp16/CPU)
+  index_build.py            # build + list_servers/load_server/load_channel + delete (library of servers)
   search.py                 # cosine top-k (normalized vectors -> dot product)
   synthesize.py             # bounded LLM synthesis, pluggable backend (gemini/ollama)
 data/                       # JSON exports (gitignored except sample_export.json)
-index/                      # generated index (gitignored)
+index/                      # generated index library (gitignored)
+  <guild_id>/               #   one folder per server (guild)
+    <channel_id>/           #     one subfolder per channel: embeddings.npy + chunks.json + meta.json
 ```
+`index_build` auto-migrates older layouts (files directly under `index/`, or flat
+`index/<guild_id>_<channel_id>/` folders) into the nested `index/<guild_id>/<channel_id>/`
+layout on first `list_servers()` call — a pure folder move, no re-embed.
 
 ## Key decisions (and why)
 - **Input = exported JSON**, no Discord API in the code: decoupled POC, no Discord
@@ -63,30 +104,29 @@ python -c "from discord_answerer import index_build as i; print(i.build_index('d
 
 ## Environment
 - Targets **Python 3.12+** (3.14 also works; PyTorch ships cp314 wheels).
-- Available GPU: RTX 4060 Ti 16 GB. Installed torch is CPU-only by default; reinstall
-  the CUDA build for GPU speed.
+- GPU: **RTX 4060 Ti 8 GB**. **torch is now the CUDA build (`2.12.1+cu126`)** on this
+  machine — `torch.cuda.is_available()` is True. `embed.py` auto-selects `cuda` (fp16) and
+  falls back to CPU elsewhere. To rebuild the env from scratch with GPU:
+  `pip install torch==2.12.1+cu126 --index-url https://download.pytorch.org/whl/cu126`
+  (the default `requirements.txt` still pulls the CPU build).
+- Embedding knobs (config.py): `DA_EMBED_DEVICE` ("" = auto), `DA_EMBED_BATCH_SIZE`
+  (default 64; lower to 8-16 to keep VRAM free for other GPU work on the 8 GB card).
 
 ## Guardrails for future changes
 - Any change to `synthesize.py` must **preserve** the `NOT_FOUND_MESSAGE` fallback and
   never enable a web search tool (nor Gemini's Google Search grounding).
 - Keep the embedding-model swap trivial (a single `DA_EMBED_MODEL` variable).
 
-## Next feature (planned): hover tooltip on cited source messages
-Goal: when hovering over a cited source — the `[Message N]` / "Discord link" entries in
-the LLM answer's sources, and/or rows in Raw mode — show the full message text in a
-**tooltip** box positioned above the link (richer styled variant = "hover card").
+## Hover tooltip on cited sources (DONE)
+Implemented in `app.py` as a custom-CSS **hover card** (`.da-tt` / `.da-tt-box`, injected
+once). It reveals the full source message when hovering over inline `[Message N]`
+citations in the LLM answer and over the entries in the source expander. UI-only. Helpers:
+`_tt_text` (HTML-escape + neutralize markdown + `\n`→`<br>`), `_tt`, `_answer_with_tooltips`
+(whole answer is HTML-escaped first so Discord HTML can't inject; markdown links left
+untouched via negative lookahead). Known limit: a citation at the very top of an
+`overflow:hidden` container can clip the box — move it below the citation if it bites.
 
-This is a **UI-only** change in `app.py`: no backend change needed. Each search result
-already carries everything required — `text`, `link`, `score`, `author_span`,
-`message_ids` (see `search.search()`); the answer's sources currently live in an
-`st.expander`.
-
-Streamlit implementation notes (simplest first):
-- **HTML `title=""`** via `st.markdown(..., unsafe_allow_html=True)`: native browser
-  tooltip, plain text only, no styling, position not controllable. Quickest.
-- **Custom CSS tooltip**: a `<span class="tt">link<span class="tt-box">message</span></span>`
-  with `:hover` CSS to reveal a box above; inject the CSS once via `st.markdown`. Gives
-  the desired "box above on hover" look. Must HTML-escape the message text and preserve
-  newlines (`<br>` or `white-space: pre-wrap`).
-- `st.popover` opens on **click**, not hover — not a match, but a possible fallback.
-- For a polished hover card, consider a small custom HTML component / `streamlit-extras`.
+## Possible next steps
+- Drag & drop currently writes the upload to a temp file then calls `build_index`; the
+  `data/` path-based flow is gone from the UI (CLI build still works).
+- Bigger ideas: automated fetching / incremental sync, reranking, multi-channel per guild.

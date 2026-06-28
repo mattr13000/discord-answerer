@@ -12,13 +12,27 @@ from . import config
 _model = None
 
 
+def _resolve_device() -> str:
+    """`DA_EMBED_DEVICE` wins; otherwise auto-pick CUDA if available, else CPU."""
+    if config.EMBED_DEVICE:
+        return config.EMBED_DEVICE
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _get_model():
     global _model
     if _model is None:
         # Lazy import: avoids loading torch as long as we only parse.
         from sentence_transformers import SentenceTransformer
 
-        _model = SentenceTransformer(config.EMBED_MODEL)
+        device = _resolve_device()
+        _model = SentenceTransformer(config.EMBED_MODEL, device=device)
+        # fp16 on GPU: ~2x less VRAM (leaves headroom for other GPU work) and faster,
+        # with no meaningful quality loss for retrieval. Skip on CPU (no fp16 speedup).
+        if device == "cuda":
+            _model = _model.half()
     return _model
 
 
@@ -30,7 +44,7 @@ def embed_documents(texts: list[str]) -> np.ndarray:
     model = _get_model()
     emb = model.encode(
         texts,
-        batch_size=32,
+        batch_size=config.EMBED_BATCH_SIZE,
         normalize_embeddings=True,
         show_progress_bar=len(texts) > 256,
     )

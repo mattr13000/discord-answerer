@@ -15,11 +15,32 @@ with **citations** back to the source messages.
 
 ---
 
+## Requirements (read this first)
+
+This app **runs the embedding model on your own machine** — it is not a thin cloud
+client. Concretely:
+
+- **A local embedding model** (`Qwen3-Embedding-0.6B`, ~1.2 GB) is downloaded on first
+  run and used to vectorize every message. **This is mandatory** for both modes (Raw and
+  LLM) — there is no cloud-embedding fallback.
+- **Indexing is the heavy step.** A small server indexes in seconds; a large one
+  (tens of thousands of messages) can take a *long* time on CPU. **A CUDA GPU is strongly
+  recommended past ~10k messages** — it cuts indexing from long minutes to a couple
+  (see the GPU note under [Install](#install)).
+- **An LLM key is optional** — only the *LLM / synthesis* mode needs one (free Gemini
+  tier, or fully-local Ollama). Raw mode needs no key at all.
+
+> TL;DR: a local model does the search; the cloud LLM (if any) only writes the final
+> answer from the messages that local model already found.
+
+---
+
 ## Quick start
 
 New here? Five steps to get running. (Each step is detailed further down.)
 
 **1. Prerequisites** — install [Python 3.12+](https://www.python.org/downloads/) (3.14 works too).
+An NVIDIA GPU is optional but **strongly recommended for large servers** (see [Install](#install)).
 
 **2. Install the app**
 ```bash
@@ -28,7 +49,8 @@ python -m venv .venv
 .venv\Scripts\activate                            # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 ```
-> First run downloads the embedding model (~1.2 GB), cached locally afterwards.
+> First run downloads the **local embedding model** (~1.2 GB), cached afterwards. It runs
+> on **your** machine (GPU if available, else CPU) and is required for every search.
 
 **3. Get a Discord export (JSON)**
 - **Someone shared a ready-made export with you?** Just drop the `.json` file into the
@@ -85,10 +107,29 @@ pip install -r requirements.txt
 ```
 
 On first run, the embedding model (~1.2 GB for Qwen3-0.6B) is downloaded and cached
-automatically. It runs locally on your GPU/CPU.
+automatically. It then runs **locally** on your GPU (if available) or CPU to vectorize
+every message — this indexing step is the compute-heavy part of the app.
 
-> Installed torch is CPU-only by default. For GPU acceleration on an NVIDIA card:
-> `pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu124`
+### GPU acceleration (recommended for large servers)
+
+`requirements.txt` installs a **CPU-only** torch by default, which works everywhere but is
+slow to index big exports (tens of thousands of messages can take a long time). On an
+NVIDIA card, swap in the CUDA build for a large speedup (indexing drops from long minutes
+to a couple):
+
+```bash
+pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+Then check the GPU is seen:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available())"   # must print True
+```
+
+> The CUDA wheel (~2.5 GB) bundles its own CUDA runtime — no system CUDA toolkit needed.
+> The same wheel works on any VRAM size; on a small (e.g. 8 GB) card, keep the embedding
+> batch size modest if you want to use the GPU for other things at the same time.
 
 ---
 
@@ -118,7 +159,8 @@ Default backend: **Gemini** (free tier, no credit card).
    ```
 
 > The free API key is **independent** of any Gemini app subscription.
-> Free tier ≈ 250 req/day for `gemini-2.5-flash` — plenty for personal use.
+> The default `gemini-3.1-flash-lite` has a generous free tier (~25× the request limits of
+> `gemini-2.5-flash`) — plenty for personal use.
 > Note: on the free tier, Google may use your requests to improve its models.
 
 **Fully local & private alternative (no key):** [Ollama](https://ollama.com).
@@ -144,7 +186,7 @@ streamlit run app.py
 |---|---|---|
 | `DA_EMBED_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model (swap: `BAAI/bge-m3`) |
 | `DA_LLM_BACKEND` | `gemini` | `gemini` or `ollama` |
-| `DA_GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model |
+| `DA_GEMINI_MODEL` | `gemini-3.1-flash-lite` | Gemini model |
 | `GEMINI_API_KEY` | — | Google AI Studio key |
 | `DA_OLLAMA_MODEL` | `qwen2.5:14b` | Local Ollama model |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
@@ -159,4 +201,4 @@ Test both on your real export and keep whichever retrieves the best messages.
 
 ## MVP limits / next steps
 - Manual ingestion (no live Discord connection). Possible next steps: automated
-  fetching, incremental sync, reranking, multi-channel.
+  fetching, incremental sync, reranking.

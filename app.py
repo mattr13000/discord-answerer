@@ -12,6 +12,7 @@ import html
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,6 +29,14 @@ st.set_page_config(page_title="Discord Answerer", page_icon="🎮", layout="wide
 # UI-only: reveals the full text of a cited source message in a box positioned
 # above the link/citation on hover. <span> is an inline tag (not an HTML block),
 # so Streamlit still parses the surrounding markdown.
+# Palette follows the active Streamlit theme (light/dark) so the card never
+# clashes with the page. `st.context.theme` is available since Streamlit 1.46.
+_theme = getattr(getattr(st, "context", None), "theme", None)
+_is_light = getattr(_theme, "type", "dark") == "light"
+_TT_BG, _TT_FG, _TT_BORDER = (
+    ("#ffffff", "#1f2030", "#d3d3df") if _is_light else ("#1f2030", "#e6e6e6", "#3a3b52")
+)
+# Token-replaced (not an f-string) so the CSS braces stay literal.
 _TOOLTIP_CSS = """
 <style>
 .da-tt { position: relative; display: inline-block; border-bottom: 1px dotted; cursor: help; }
@@ -36,8 +45,8 @@ _TOOLTIP_CSS = """
     position: absolute; left: 0; bottom: 135%; z-index: 1000;
     width: max-content; max-width: 460px; max-height: 320px; overflow-y: auto;
     padding: 10px 12px; border-radius: 8px;
-    background: #1f2030; color: #e6e6e6;
-    border: 1px solid #3a3b52; box-shadow: 0 6px 22px rgba(0, 0, 0, .4);
+    background: __BG__; color: __FG__;
+    border: 1px solid __BORDER__; box-shadow: 0 6px 22px rgba(0, 0, 0, .4);
     font-size: .85rem; line-height: 1.45; font-weight: 400;
     white-space: normal; text-align: left;
     transition: opacity .12s ease-in-out;
@@ -45,11 +54,28 @@ _TOOLTIP_CSS = """
 .da-tt:hover .da-tt-box { visibility: visible; opacity: 1; }
 .da-tt .da-tt-box::after {
     content: ""; position: absolute; top: 100%; left: 18px;
-    border: 6px solid transparent; border-top-color: #1f2030;
+    border: 6px solid transparent; border-top-color: __BG__;
 }
 </style>
-"""
+""".replace("__BG__", _TT_BG).replace("__FG__", _TT_FG).replace("__BORDER__", _TT_BORDER)
 st.markdown(_TOOLTIP_CSS, unsafe_allow_html=True)
+
+# --- Ask/answer panel: a solid filled box that visually separates the question +
+# answer zone from the scope selector sitting above it. Theme-agnostic (neutral
+# semi-transparent fill, readable on both light and dark Streamlit themes).
+_PANEL_CSS = """
+<style>
+.st-key-ask_panel {
+    background: rgba(130, 130, 150, .08);
+    border: 1px solid rgba(130, 130, 150, .20);
+    border-radius: 12px;
+    padding: 18px 22px;
+}
+/* Keep the answer + results at a comfortable reading width on wide layout. */
+.st-key-answer_box { max-width: 860px; }
+</style>
+"""
+st.markdown(_PANEL_CSS, unsafe_allow_html=True)
 
 
 def _tt_text(message: str) -> str:
@@ -74,110 +100,337 @@ def _tt(label_html: str, message: str) -> str:
 
 
 def _answer_with_tooltips(answer: str, results) -> str:
-    """Add a hover card on each inline `[Message N]` citation in the LLM answer.
+    """Add a hover card on each message number inside an LLM citation.
 
-    The whole answer is HTML-escaped first so that any raw HTML carried over
-    from a Discord message cannot be injected; markdown still renders.
-    `[Message N](link)` markdown links are left untouched (negative lookahead).
+    Handles both single (`[Message 1]`) and grouped (`[Message 1, 2, 3]`)
+    citations: every *number* becomes its own hover target, so the brackets and
+    the "Message(s)" label stay plain text (lighter UI). The whole answer is
+    HTML-escaped first so raw HTML from a Discord message can't be injected;
+    markdown still renders, and `[Message N](link)` markdown links are left
+    untouched (negative lookahead).
     """
     esc = html.escape(answer)
 
-    def repl(m):
-        n = int(m.group(1))
+    def _wrap_number(nm):
+        n = int(nm.group(0))
         if 1 <= n <= len(results):
-            return _tt(f"[Message {n}]", results[n - 1]["text"])
-        return m.group(0)
+            return _tt(nm.group(0), results[n - 1]["text"])
+        return nm.group(0)
 
-    return re.sub(r"\[Message (\d+)\](?!\s*\()", repl, esc)
+    def _wrap_citation(m):
+        return re.sub(r"\d+", _wrap_number, m.group(0))
+
+    return re.sub(r"\[Messages?\b[^\]]*\](?!\s*\()", _wrap_citation, esc)
 
 
-@st.cache_resource(show_spinner="Loading the index…")
-def _load_index():
-    return index_build.load_index()
+def _friendly_error(exc, backend: str) -> str:
+    """Turn a raw exception into a calm, actionable message for non-tech users."""
+    msg = str(exc)
+    if backend == "ollama" and ("Cannot reach Ollama" in msg or "urlopen" in msg.lower()):
+        return (
+            "Couldn't reach the local Ollama server. Make sure Ollama is running "
+            "and the model is installed — or switch the answer engine back to "
+            "**Gemini** in Advanced settings."
+        )
+    if "API key" in msg or "GEMINI_API_KEY" in msg:
+        return (
+            "The Gemini API key seems missing or invalid. Add a valid free key in "
+            "the left panel (step 2) — [get one here](https://aistudio.google.com/apikey)."
+        )
+    low = msg.lower()
+    if "429" in msg or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
+        return (
+            "⏳ The free Gemini quota / rate limit was hit. Wait a minute and try "
+            "again — or switch the answer engine to **ollama** (fully local, no quota) "
+            "in Advanced settings."
+        )
+    return f"Something went wrong while writing the answer:\n\n{msg}"
+
+
+@st.cache_data(show_spinner=False, max_entries=512)
+def _synthesize_cached(question: str, backend: str, sources: tuple) -> str:
+    """Cache LLM answers by (question, backend, retrieved sources).
+
+    Spamming Send, or any rerun (toggling a display option, moving a slider),
+    re-executes the script — but an identical request is served from cache
+    instead of firing a new, rate-limited and metered, API call. Exceptions are
+    not cached, so a 429/quota error still surfaces normally.
+    """
+    chunks = [{"link": link, "text": text} for link, text in sources]
+    return synth_mod.synthesize(question, chunks, backend=backend)
+
+
+@st.cache_resource(show_spinner="Loading your Discord…")
+def _load_scope(guild_id: str, channel_id: str | None):
+    """Load the active scope: the whole server, or a single channel.
+
+    `channel_id is None` -> stack every channel of the server (np.vstack of the
+    already-saved matrices, no recompute); otherwise load just that channel.
+    """
+    if channel_id is None:
+        return index_build.load_server(guild_id)
+    return index_build.load_channel(guild_id, channel_id)
 
 
 def _clear_cache():
-    _load_index.clear()
+    _load_scope.clear()
 
 
 st.title("🎮 Discord Answerer")
 st.caption(
-    "Synthesized answers strictly bounded to the messages of an exported Discord. "
-    "**0 web, 0 assumption**: if it's not in the Discord, it doesn't exist."
+    "Ask anything about your Discord. Answers come **only** from its messages — "
+    "no web, no guessing. If it's not in the Discord, you'll be told so."
 )
 
-# --- Sidebar: ingestion + settings ---
+# --- Sidebar: setup ---
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header("Setup")
 
-    default_path = str(config.DATA_DIR / "export.json")
-    json_path = st.text_input("Export file (DiscordChatExporter JSON)", value=default_path)
-    if st.button("📥 (Re)index", use_container_width=True):
-        try:
-            with st.spinner("Indexing (embeddings)…"):
-                meta = index_build.build_index(json_path)
+    servers = index_build.list_servers()
+
+    # Step 1 — pick a saved server (recall)
+    st.markdown("**1 · Your servers**")
+    if not servers:
+        st.caption("None yet — add one below 👇")
+    else:
+        gids = [s["guild_id"] for s in servers]
+        by_gid = {s["guild_id"]: s for s in servers}
+        labels = {
+            s["guild_id"]: f'{s.get("guild_name") or "?"}  ({s["num_channels"]} ch.)'
+            for s in servers
+        }
+        default_gid = st.session_state.get("active_key", gids[0])
+        if default_gid not in gids:
+            default_gid = gids[0]
+        active_key = st.selectbox(
+            "Active server",
+            options=gids,
+            index=gids.index(default_gid),
+            format_func=lambda g: labels[g],
+        )
+        st.session_state["active_key"] = active_key
+
+        srv = by_gid[active_key]
+        with st.expander(f"📂 {srv['num_channels']} channels · {srv['num_messages_total']} msgs"):
+            for ch in srv["channels"]:
+                col_a, col_b = st.columns([5, 1], vertical_alignment="center")
+                col_a.caption(f"#{ch.get('channel_name', '?')} · {ch.get('num_messages', '?')} msgs")
+                if col_b.button("🗑️", key=f"del_{ch.get('channel_id')}", help="Remove this channel", use_container_width=True):
+                    index_build.delete_channel(active_key, ch.get("channel_id"))
+                    _clear_cache()
+                    st.session_state.pop("active_key", None)
+                    st.rerun()
+            with st.popover("🗑️ Remove whole server", use_container_width=True):
+                st.caption(f"Remove **{srv.get('guild_name') or '?'}** and all its channels?")
+                if st.button("Yes, remove it", use_container_width=True):
+                    index_build.delete_server(active_key)
+                    _clear_cache()
+                    st.session_state.pop("active_key", None)
+                    st.rerun()
+
+    # Step 2 — add channels (drag & drop, one JSON per channel). Once at least one
+    # server exists, fold it into an expander so it stops competing with the
+    # daily "just ask" flow; on first launch it stays open for onboarding.
+    if servers:
+        add_ctx = st.expander("➕ Add channels")
+    else:
+        st.markdown("**2 · Add channels**")
+        add_ctx = st.container()
+    with add_ctx:
+        uploaded = st.file_uploader(
+            "Drop your exports (.json)",
+            type=["json"],
+            accept_multiple_files=True,
+            help="One JSON per channel, exported with DiscordChatExporter. Channels of the "
+            "same server are grouped automatically.",
+        )
+        if uploaded and st.button(f"📥 Index {len(uploaded)} file(s)", use_container_width=True):
+            progress = st.progress(0.0)
+            done, failures, last_meta = 0, [], None
+            for i, up in enumerate(uploaded, 1):
+                progress.progress((i - 1) / len(uploaded), text=f"Channel {i}/{len(uploaded)}…")
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
+                        tmp.write(up.getbuffer())
+                        tmp_path = tmp.name
+                    last_meta = index_build.build_index(tmp_path)
+                    os.unlink(tmp_path)
+                    done += 1
+                except Exception as e:  # noqa: BLE001
+                    failures.append(f"{up.name}: {e}")
+            progress.progress(1.0, text="Done")
             _clear_cache()
-            st.success(f"Indexed: {meta['num_chunks']} chunks / {meta['num_messages']} messages.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Indexing failed: {e}")
+            if last_meta:
+                st.session_state["active_key"] = str(last_meta.get("guild_id", ""))
+            if done:
+                st.success(f"Indexed {done} channel(s) into **{last_meta.get('guild_name', '?')}**.")
+            for f in failures:
+                st.error(f"Couldn't index {f}")
+            if done:
+                st.rerun()
 
-    st.divider()
-    k = st.slider("Top-k messages", 5, 60, config.DEFAULT_TOP_K, step=5)
-    cutoff = st.slider("Similarity cutoff", 0.0, 1.0, float(config.DEFAULT_SCORE_CUTOFF), 0.05)
-    backend = st.selectbox(
-        "LLM backend (LLM mode)",
-        options=["gemini", "ollama"],
-        index=0 if config.LLM_BACKEND == "gemini" else 1,
+    # Step 3 — Gemini key (needed for AI answers only). Folded once a key is set
+    # (env var or already pasted), shown plainly otherwise.
+    has_env_key = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    if has_env_key:
+        key_ctx = st.expander("🔑 AI key · active ✓")
+    else:
+        st.markdown("**3 · AI answer key**")
+        key_ctx = st.container()
+    with key_ctx:
+        key_input = st.text_input(
+            "Gemini API key",
+            type="password",
+            placeholder="Already set ✓" if has_env_key else "Paste your free key here",
+            help="Free, no credit card. Needed only for AI answers — not for browsing.",
+        )
+        if key_input:
+            os.environ["GEMINI_API_KEY"] = key_input.strip()
+        key_ready = has_env_key or bool(key_input)
+        if not key_ready:
+            st.caption("🔑 No key yet → [get a free one](https://aistudio.google.com/apikey)")
+
+    with st.expander("⚙️ Advanced settings"):
+        k = st.slider(
+            "Messages to retrieve", 5, 100, config.DEFAULT_TOP_K, step=5,
+            help="How many Discord messages to pull in before answering.",
+        )
+        cutoff = st.slider(
+            "Match strictness", 0.0, 1.0, float(config.DEFAULT_SCORE_CUTOFF), 0.05,
+            help="Higher = keep only very close matches.",
+        )
+        backend = st.selectbox(
+            "Answer engine", options=["gemini", "ollama"],
+            index=0 if config.LLM_BACKEND == "gemini" else 1,
+            help="gemini = free cloud (needs a key). ollama = fully local (needs Ollama running).",
+        )
+        show_scores = st.checkbox(
+            "Show match scores", value=False,
+            help="Display the technical relevance score on each message.",
+        )
+
+# --- Onboarding until a server is added ---
+if not servers:
+    st.info(
+        "👋 **Welcome!** Three steps to get started:\n\n"
+        "1. Export your Discord channels to JSON with **DiscordChatExporter** (one file each).\n"
+        "2. In the left panel, **drop the .json files** and click **Index** — channels of the "
+        "same server are grouped automatically.\n"
+        "3. For AI answers, paste a free Gemini API key — then ask your question below."
     )
-
-# --- Index required ---
-if not index_build.index_exists():
-    st.info("No index yet. Enter a JSON export in the sidebar and click **(Re)index**.")
     st.stop()
 
-embeddings, chunks_data, meta = _load_index()
+active_key = st.session_state.get("active_key") or servers[0]["guild_id"]
+active_srv = next((s for s in servers if s["guild_id"] == active_key), servers[0])
+
+# Scope: the whole server, or one of its channels.
+WHOLE = "🌐 Whole server"
+scope_options = [WHOLE] + [c.get("channel_id") for c in active_srv["channels"]]
+scope_labels = {c.get("channel_id"): f"#{c.get('channel_name', '?')}" for c in active_srv["channels"]}
+scope = st.radio(
+    "Search in",
+    options=scope_options,
+    format_func=lambda o: WHOLE if o == WHOLE else scope_labels.get(o, f"#{o}"),
+    horizontal=True,
+)
+scope_channel = None if scope == WHOLE else scope
+embeddings, chunks_data, meta = _load_scope(active_key, scope_channel)
+
+scope_detail = (
+    f"{meta.get('num_channels', '?')} channels"
+    if scope_channel is None
+    else f"#{meta.get('channel_name', '?')}"
+)
 st.caption(
-    f"Index: **{meta.get('guild_name','?')}** / #{meta.get('channel_name','?')} — "
-    f"{meta['num_chunks']} chunks, model `{meta['embed_model']}`."
+    f"📚 Reading from **{meta.get('guild_name', '?')}** · "
+    f"{scope_detail} · {meta.get('num_messages', '?')} messages"
 )
 
-# --- Search ---
-mode = st.radio("Mode", ["LLM (synthesis)", "Raw (raw messages)"], horizontal=True)
-question = st.text_input("Your question", placeholder="e.g. what is the best end-game build?")
+# --- Ask --- (wrapped in a solid panel that separates it from the scope selector)
+ANSWER, BROWSE = "💬 Get an answer", "🔍 Browse messages"
+with st.container(key="ask_panel"):
+    # Mode stays outside the form so switching it re-renders the persisted
+    # question immediately (no need to re-submit).
+    mode = st.radio(
+        "What do you want to do?",
+        [ANSWER, BROWSE],
+        horizontal=True,
+        captions=["AI summary with cited sources", "Read the raw matching messages"],
+    )
+    # Single-shot chat look: the current question is shown back as a user bubble
+    # and the result as an assistant bubble (no multi-turn memory — each question
+    # triggers an independent retrieval). The question persists in session_state
+    # so the exchange stays visible across reruns (sliders, mode switch) until a
+    # new question is sent.
+    question = st.session_state.get("question", "")
 
-if question:
-    results = search_mod.search(question, embeddings, chunks_data, k=k, cutoff=cutoff)
+    if question:
+        with st.container(key="answer_box"):
+            with st.chat_message("user"):
+                st.markdown(question)
 
-    if mode.startswith("LLM"):
-        if not results:
-            st.warning(config.NOT_FOUND_MESSAGE)
-        else:
-            try:
-                with st.spinner(f"Synthesizing via {backend}…"):
-                    answer = synth_mod.synthesize(question, results, backend=backend)
-                st.markdown("### Answer")
-                st.caption("Hover a [Message N] citation to preview its source message.")
-                st.markdown(_answer_with_tooltips(answer, results), unsafe_allow_html=True)
-            except Exception as e:  # noqa: BLE001
-                st.error(str(e))
-            with st.expander(f"View the {len(results)} source messages used"):
-                items = []
-                for i, r in enumerate(results, 1):
-                    link = html.escape(r["link"], quote=True)
-                    items.append(
-                        f'{_tt(f"<b>[Message {i}]</b>", r["text"])} · '
-                        f'score {r["score"]:.3f} · '
-                        f'<a href="{link}" target="_blank">Discord link</a>'
-                    )
-                st.markdown("<br><br>".join(items), unsafe_allow_html=True)
-    else:
-        st.markdown(f"### {len(results)} most relevant messages")
-        if not results:
-            st.warning("No message above the cutoff.")
-        for i, r in enumerate(results, 1):
-            st.markdown(
-                f"**[{i}]** · score **{r['score']:.3f}** · _{r.get('author_span','')}_ · "
-                f"[Discord link]({r['link']})"
-            )
-            st.text(r["text"])
-            st.divider()
+            with st.spinner("🔎 Searching the Discord…"):
+                results = search_mod.search(question, embeddings, chunks_data, k=k, cutoff=cutoff)
+
+            with st.chat_message("assistant"):
+                if mode == ANSWER:
+                    if not results:
+                        st.warning(config.NOT_FOUND_MESSAGE)
+                    elif backend == "gemini" and not key_ready:
+                        st.info(
+                            "🔑 To get an AI answer with **Gemini**, add a free API key in the "
+                            "left panel — no credit card needed, "
+                            "[get one here](https://aistudio.google.com/apikey).\n\n"
+                            "Or switch the answer engine to **ollama** in Advanced settings, or use "
+                            "**🔍 Browse messages** to read the raw matches."
+                        )
+                    else:
+                        try:
+                            sources = tuple((r["link"], r["text"]) for r in results)
+                            with st.status(
+                                "✍️ Reading the Discord and writing your answer…", expanded=False
+                            ) as status:
+                                answer = _synthesize_cached(question, backend, sources)
+                                status.update(label="✅ Answer ready", state="complete")
+                            st.caption("Hover a [Message N] citation to preview its source message.")
+                            st.markdown(_answer_with_tooltips(answer, results), unsafe_allow_html=True)
+                        except Exception as e:  # noqa: BLE001
+                            st.error(_friendly_error(e, backend))
+                        with st.expander(f"View the {len(results)} source messages used"):
+                            items = []
+                            for i, r in enumerate(results, 1):
+                                link = html.escape(r["link"], quote=True)
+                                score = f' · score {r["score"]:.3f}' if show_scores else ""
+                                chan = r.get("channel_name")
+                                chan = f' · <code>#{html.escape(chan)}</code>' if chan else ""
+                                items.append(
+                                    f'{_tt(f"<b>[Message {i}]</b>", r["text"])}{chan}{score} · '
+                                    f'<a href="{link}" target="_blank">Discord link</a>'
+                                )
+                            st.markdown("<br><br>".join(items), unsafe_allow_html=True)
+                else:
+                    if not results:
+                        st.warning("No matching message found. Try rephrasing your question.")
+                    else:
+                        st.markdown(f"**{len(results)} matching messages**")
+                        for i, r in enumerate(results, 1):
+                            score = f" · match **{r['score']:.3f}**" if show_scores else ""
+                            chan = f" · `#{r['channel_name']}`" if r.get("channel_name") else ""
+                            st.markdown(
+                                f"**{i}.** _{r.get('author_span', '')}_{chan}{score} · "
+                                f"[Discord link]({r['link']})"
+                            )
+                            st.text(r["text"])
+                            st.divider()
+
+    # st.chat_input draws the send button *inside* the text box and submits on
+    # Enter or click. Placed inside this container (not the app root) it renders
+    # inline instead of pinned to the page bottom, and after the bubbles so it
+    # sits below the current exchange (chat convention). On submit we stash the
+    # text and rerun so the new question's bubbles render immediately, with no
+    # one-rerun lag.
+    placeholder = "Ask another question…" if question else "e.g. what is the best end-game build?"
+    prompt = st.chat_input(placeholder)
+    if prompt:
+        st.session_state["question"] = prompt
+        st.rerun()
