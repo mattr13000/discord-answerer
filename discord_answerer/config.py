@@ -46,7 +46,9 @@ DEFAULT_SCORE_CUTOFF = 0.35  # trims obvious noise; the real anti-hallucination 
 
 # --- LLM backend (synthesis) ---
 LLM_BACKEND = os.environ.get("DA_LLM_BACKEND", "gemini")  # "gemini" | "ollama"
-GEMINI_MODEL = os.environ.get("DA_GEMINI_MODEL", "gemini-2.5-flash")
+# Default to 3.1-flash-lite: free tier with ~25x higher rate limits than 2.5-flash.
+# Override with DA_GEMINI_MODEL (e.g. "gemini-2.5-flash", "gemini-3.1-flash-lite-preview").
+GEMINI_MODEL = os.environ.get("DA_GEMINI_MODEL", "gemini-3.1-flash-lite")
 OLLAMA_MODEL = os.environ.get("DA_OLLAMA_MODEL", "qwen2.5:14b")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
