@@ -19,7 +19,7 @@ Discord export) and **querying** (every question).
 ```mermaid
 flowchart TD
     subgraph INGEST["🗂️ Indexing — once per Discord export"]
-        A["DiscordChatExporter<br/>JSON export"] -->|parse.py| B["normalized messages<br/>(id, ts, author, content, reply_to)"]
+        A["DiscordChatExporter<br/>JSON export"] -->|parse.py| B["normalized messages<br/>(id, ts, author, content)"]
         B -->|chunk.py| C["conversation windows<br/>12 msgs, 3 overlap,<br/>split on 30-min gaps"]
         C -->|embed.py<br/>Qwen3-Embedding-0.6B| D["L2-normalized vectors"]
         D -->|index_build.py| E[("index/&lt;guild&gt;/&lt;channel&gt;/<br/>embeddings.npy<br/>chunks.json + meta.json")]
@@ -87,12 +87,17 @@ hands it a cleaner packet. Rerank load failures **fall back** to cosine order
 ```mermaid
 flowchart TD
     APP["app.py<br/>Streamlit UI (Raw + LLM modes)"]
+    CLI["__main__.py<br/>CLI: build · servers · ask"]
 
+    APP --> QY["query.py<br/>pipeline: retrieve · ask"]
+    CLI --> QY
+    CLI --> IB
     APP --> CFG["config.py<br/>env-overridable settings + .env loader"]
     APP --> IB["index_build.py<br/>build · list · load · delete<br/>(library of Discords)"]
-    APP --> SE["search.py<br/>cosine → adaptive pool"]
-    APP --> RR["rerank.py<br/>cross-encoder rerank"]
-    APP --> SY["synthesize.py<br/>bounded LLM synthesis"]
+    QY --> IB
+    QY --> SE["search.py<br/>cosine → adaptive pool"]
+    QY --> RR["rerank.py<br/>cross-encoder rerank"]
+    QY --> SY["synthesize.py<br/>bounded LLM synthesis"]
 
     IB --> PA["parse.py<br/>JSON → Message / ParsedExport"]
     IB --> CH["chunk.py<br/>conversation windows"]
@@ -111,9 +116,11 @@ flowchart TD
 
 | Module | Role | Key entry points |
 |---|---|---|
-| `app.py` | Streamlit UI — ingestion, library switch, Raw & LLM modes, tooltips | — |
+| `app.py` | Streamlit UI — ingestion, library switch, Raw & LLM modes, tooltips; wraps `query` in Streamlit caches | — |
+| `__main__.py` | CLI (`python -m discord_answerer`): `build`, `servers`, `ask` — same pipeline, headless | `main` |
+| `query.py` | **Pipeline orchestration** — wires search → rerank → synthesize so UI/CLI/tests share one flow | `retrieve`, `ask` |
 | `config.py` | Central config, all env-overridable; loads `.env` with no dep | constants |
-| `parse.py` | DiscordChatExporter JSON → normalized messages | `parse_export`, `message_link` |
+| `parse.py` | DiscordChatExporter JSON → normalized messages (chronologically sorted) | `parse_export`, `parse_timestamp`, `message_link` |
 | `chunk.py` | Group messages into overlapping conversation windows | `build_chunks` |
 | `embed.py` | Local multilingual embeddings (lazy-imports torch) | `embed_documents`, `embed_query` |
 | `index_build.py` | Build the per-channel index; group channels into servers, load & delete | `build_index`, `list_servers`, `load_server`, `load_channel`, `delete_server`, `delete_channel` |

@@ -55,7 +55,7 @@ POOL_MIN = int(os.environ.get("DA_POOL_MIN", "100"))
 POOL_MAX = int(os.environ.get("DA_POOL_MAX", "2000"))
 # Coarse pre-filter applied on the pool (NOT the fine ranking — the reranker does
 # that). Kept loose: the real anti-hallucination guard is the LLM.
-DEFAULT_SCORE_CUTOFF = 0.35
+DEFAULT_SCORE_CUTOFF = float(os.environ.get("DA_SCORE_CUTOFF", "0.35"))
 
 # Stage 3 — what Gemini actually sees (precision). CONSTANT: does not scale with
 # the corpus, so the context stays tight (no "lost in the middle", strong lock).

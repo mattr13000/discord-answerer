@@ -46,6 +46,9 @@ def _read_meta(d) -> dict | None:
         return None
 
 
+_migrated = False
+
+
 def _migrate_layout() -> None:
     """Bring older index layouts into `index/<guild_id>/<channel_id>/`.
 
@@ -53,8 +56,14 @@ def _migrate_layout() -> None:
     - flat files directly in `index/` (the very first single-index layout);
     - flat per-channel folders `index/<guild>_<channel>/` (the first library).
     Pure folder moves — embeddings are never recomputed.
+
+    Legacy folders only ever come from older builds, never created at runtime, so
+    once a process has migrated there is nothing new to scan. The `_migrated`
+    guard makes this a no-op on subsequent calls (list_servers runs on every
+    Streamlit rerun).
     """
-    if not config.INDEX_DIR.exists():
+    global _migrated
+    if _migrated or not config.INDEX_DIR.exists():
         return
 
     # 1. files-directly-in-index/  ->  index/<guild>/<channel>/
@@ -85,6 +94,8 @@ def _migrate_layout() -> None:
             if src.exists():
                 shutil.move(str(src), str(dest / name))
         shutil.rmtree(d, ignore_errors=True)
+
+    _migrated = True
 
 
 def build_index(json_path) -> dict:

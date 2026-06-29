@@ -7,7 +7,6 @@ conversations.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
 
 from . import config, parse
 
@@ -21,21 +20,12 @@ class Chunk:
     author_span: str
 
 
-def _parse_ts(ts: str):
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
 def _segments(messages):
     """Split the message list into segments separated by a large time gap."""
     seg: list = []
     last_ts = None
     for m in messages:
-        ts = _parse_ts(m.timestamp)
+        ts = parse.parse_timestamp(m.timestamp)
         if last_ts and ts:
             gap_min = (ts - last_ts).total_seconds() / 60.0
             if gap_min > config.CHUNK_TIME_GAP_MINUTES and seg:

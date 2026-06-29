@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import streamlit as st
 
 from discord_answerer import config, index_build
+from discord_answerer import query as query_mod
 from discord_answerer import rerank as rerank_mod
-from discord_answerer import search as search_mod
 from discord_answerer import synthesize as synth_mod
 
 st.set_page_config(page_title="Discord Answerer", page_icon="🎮", layout="wide")
@@ -134,6 +134,14 @@ def _answer_with_tooltips(answer: str, results) -> str:
     return re.sub(r"\[Messages?\b[^\]]*\](?!\s*\()", _wrap_citation, esc)
 
 
+def _display_score(r) -> float:
+    """The score that actually drove the ordering: the cross-encoder's
+    `rerank_score` when present, else the stage-1 cosine `score` (fallback path).
+    Showing cosine while ranking by rerank would print numbers that contradict
+    the order the user sees."""
+    return r.get("rerank_score", r.get("score", 0.0))
+
+
 def _friendly_error(exc, backend: str) -> str:
     """Turn a raw exception into a calm, actionable message for non-tech users."""
     msg = str(exc)
@@ -146,7 +154,7 @@ def _friendly_error(exc, backend: str) -> str:
     if "API key" in msg or "GEMINI_API_KEY" in msg:
         return (
             "The Gemini API key seems missing or invalid. Add a valid free key in "
-            "the left panel (step 2) — [get one here](https://aistudio.google.com/apikey)."
+            "the left panel (step 3) — [get one here](https://aistudio.google.com/apikey)."
         )
     low = msg.lower()
     if "429" in msg or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
@@ -171,6 +179,21 @@ def _synthesize_cached(question: str, backend: str, sources: tuple) -> str:
     return synth_mod.synthesize(question, chunks, backend=backend)
 
 
+@st.cache_data(show_spinner=False, max_entries=256)
+def _retrieve_cached(question: str, guild_id: str, scope: str | None, k: int, cutoff: float):
+    """Cache retrieval (stage 1 search + stage 2 rerank) by its inputs.
+
+    Like _synthesize_cached, this shields an answer already on screen from
+    Streamlit's rerun-on-every-click model. The cross-encoder rerank runs on the
+    GPU and is the slow step; without this, clicking the scope radio or nudging a
+    slider re-ran it every time (freezing the page) only to reproduce the
+    identical frozen result. Cached here, those clicks are instant cache hits and
+    configure only the *next* question.
+    """
+    a_emb, a_chunks, _ = _load_scope(guild_id, scope)
+    return query_mod.retrieve(question, a_emb, a_chunks, k=k, cutoff=cutoff)
+
+
 @st.cache_resource(show_spinner="Loading your Discord…")
 def _load_scope(guild_id: str, channel_id: str | None):
     """Load the active scope: the whole server, or a single channel.
@@ -185,6 +208,9 @@ def _load_scope(guild_id: str, channel_id: str | None):
 
 def _clear_cache():
     _load_scope.clear()
+    # Retrieval is cached by (question, scope, …); after a re-index or delete its
+    # chunks can be stale, so drop it alongside the loaded matrices.
+    _retrieve_cached.clear()
 
 
 st.title("🎮 Discord Answerer")
@@ -260,15 +286,18 @@ with st.sidebar:
             done, failures, last_meta = 0, [], None
             for i, up in enumerate(uploaded, 1):
                 progress.progress((i - 1) / len(uploaded), text=f"Channel {i}/{len(uploaded)}…")
+                tmp_path = None
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
                         tmp.write(up.getbuffer())
                         tmp_path = tmp.name
                     last_meta = index_build.build_index(tmp_path)
-                    os.unlink(tmp_path)
                     done += 1
                 except Exception as e:  # noqa: BLE001
                     failures.append(f"{up.name}: {e}")
+                finally:
+                    if tmp_path:
+                        os.unlink(tmp_path)
             progress.progress(1.0, text="Done")
             _clear_cache()
             if last_meta:
@@ -408,12 +437,21 @@ with st.container(key="ask_panel"):
             asked = st.session_state.get(
                 "asked", {"scope": scope_channel, "k": k, "cutoff": cutoff}
             )
-            a_emb, a_chunks, _ = _load_scope(active_key, asked["scope"])
             with st.spinner("🔎 Searching the Discord…"):
                 # Stage 1: adaptive cosine pool (recall). Stage 2: cross-encoder
-                # rerank trims it to the asked FINAL_K best (precision).
-                pool = search_mod.search(question, a_emb, a_chunks, cutoff=asked["cutoff"])
-                results = rerank_mod.rerank(question, pool, top_k=asked["k"])
+                # rerank trims it to the asked FINAL_K best (precision). Cached by
+                # (question, scope, k, cutoff) so reruns don't re-fire the GPU.
+                results = _retrieve_cached(
+                    question, active_key, asked["scope"], asked["k"], asked["cutoff"]
+                )
+            # Reranker unavailable -> retrieval silently fell back to cosine order.
+            # Warn once so the quality drop isn't invisible (see rerank.fallback_active).
+            if rerank_mod.fallback_active() and not st.session_state.get("_rerank_warned"):
+                st.toast(
+                    "⚠️ Reranker unavailable — using basic ranking. Answers may be less precise.",
+                    icon="⚠️",
+                )
+                st.session_state["_rerank_warned"] = True
 
             with st.chat_message("assistant"):
                 if mode == ANSWER:
@@ -448,7 +486,7 @@ with st.container(key="ask_panel"):
                             items = []
                             for i, r in enumerate(results, 1):
                                 link = html.escape(r["link"], quote=True)
-                                score = f' · score {r["score"]:.3f}' if show_scores else ""
+                                score = f' · score {_display_score(r):.3f}' if show_scores else ""
                                 chan = r.get("channel_name")
                                 chan = f' · <code>#{html.escape(chan)}</code>' if chan else ""
                                 items.append(
@@ -462,7 +500,7 @@ with st.container(key="ask_panel"):
                     else:
                         st.markdown(f"**{len(results)} matching messages**")
                         for i, r in enumerate(results, 1):
-                            score = f" · match **{r['score']:.3f}**" if show_scores else ""
+                            score = f" · match **{_display_score(r):.3f}**" if show_scores else ""
                             chan = f" · `#{r['channel_name']}`" if r.get("channel_name") else ""
                             st.markdown(
                                 f"**{i}.** _{r.get('author_span', '')}_{chan}{score} · "

@@ -88,15 +88,17 @@ gemini-2.5->3.1). Plus other working-tree edits to `app.py`/`index_build.py`/`sy
 
 ## Architecture
 ```
-app.py                      # Streamlit UI (Raw + LLM modes)
+app.py                      # Streamlit UI (Raw + LLM modes); wraps query.* in st caches
 discord_answerer/
+  __main__.py               # CLI: python -m discord_answerer {build,servers,ask} (same pipeline, headless)
+  query.py                  # pipeline orchestration: retrieve (search->rerank) + ask (load->retrieve->synthesize)
   config.py                 # everything overridable via env var; loads .env
-  parse.py                  # DiscordChatExporter JSON -> normalized messages
+  parse.py                  # DiscordChatExporter JSON -> normalized messages (sorted; parse_timestamp shared w/ chunk)
   chunk.py                  # conversation windows (NOT 1 embedding/message)
   embed.py                  # local embeddings (Qwen3-0.6B default, bge-m3 alt); device auto (CUDA+fp16/CPU)
   index_build.py            # build + list_servers/load_server/load_channel + delete (library of servers)
-  search.py                 # stage 1: cosine -> adaptive candidate POOL (config.pool_size)
-  rerank.py                 # stage 2: local cross-encoder (bge-reranker-v2-m3); CUDA+fp16; safe fallback
+  search.py                 # stage 1: cosine -> adaptive candidate POOL (argpartition top-k; config.pool_size)
+  rerank.py                 # stage 2: local cross-encoder (bge-reranker-v2-m3); CUDA+fp16; safe fallback + fallback_active()
   synthesize.py             # stage 3: bounded LLM synthesis of FINAL_K chunks, pluggable backend (gemini/ollama)
 data/                       # JSON exports (gitignored except sample_export.json)
 index/                      # generated index library (gitignored)
@@ -121,9 +123,13 @@ layout on first `list_servers()` call — a pure folder move, no re-embed.
 
 ## Commands
 ```bash
-streamlit run app.py                       # launch the UI
-python -c "from discord_answerer import index_build as i; print(i.build_index('data/sample_export.json'))"  # index via CLI
+streamlit run app.py                                         # launch the UI
+python -m discord_answerer build data/sample_export.json     # index an export (CLI)
+python -m discord_answerer servers                           # list indexed servers/channels + ids
+python -m discord_answerer ask "best end-game build?" --guild <id> [--channel <id>] [--show-sources]
 ```
+The CLI is a thin wrapper over `query.ask`/`index_build` — same pipeline as the UI,
+headless (useful for tests/scripts). `ask` needs a Gemini key unless `--backend ollama`.
 
 ## Environment
 - Targets **Python 3.12+** (3.14 also works; PyTorch ships cp314 wheels).
