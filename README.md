@@ -20,9 +20,13 @@ with **citations** back to the source messages.
 This app **runs the embedding model on your own machine** — it is not a thin cloud
 client. Concretely:
 
-- **A local embedding model** (`Qwen3-Embedding-0.6B`, ~1.2 GB) is downloaded on first
-  run and used to vectorize every message. **This is mandatory** for both modes (Raw and
-  LLM) — there is no cloud-embedding fallback.
+- **Two local models** are downloaded on first use and run on your machine: the
+  **embedding model** (`Qwen3-Embedding-0.6B`, ~1.2 GB) used to vectorize every message
+  (**mandatory** for both Raw and LLM modes — no cloud-embedding fallback), and a
+  **cross-encoder reranker** (`BAAI/bge-reranker-v2-m3`, ~1.1 GB) that sharpens which
+  messages are kept before answering. The reranker downloads on the first *question*; if
+  it can't load it's skipped gracefully (you keep plain cosine search). Disable it with
+  `DA_RERANK=0`.
 - **Indexing is the heavy step.** A small server indexes in seconds; a large one
   (tens of thousands of messages) can take a *long* time on CPU. **A CUDA GPU is strongly
   recommended past ~10k messages** — it cuts indexing from long minutes to a couple
@@ -82,7 +86,8 @@ Opens http://localhost:8501 → point to your JSON in the sidebar, click **(Re)i
 JSON export (DiscordChatExporter)
    -> parse -> chunking into conversation windows
    -> local embeddings (Qwen3-Embedding-0.6B)
-   -> numpy index -> cosine top-k search
+   -> numpy index -> cosine search: adaptive candidate pool (recall)
+   -> local cross-encoder rerank (bge-reranker-v2-m3) -> top messages (precision)
    -> bounded LLM synthesis (Gemini free tier / local Ollama)
    -> answer + Discord links of the cited messages
 ```
@@ -190,6 +195,10 @@ streamlit run app.py
 | `GEMINI_API_KEY` | — | Google AI Studio key |
 | `DA_OLLAMA_MODEL` | `qwen2.5:14b` | Local Ollama model |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
+| `DA_RERANK` | `1` | Cross-encoder reranker on/off (`0` = plain cosine) |
+| `DA_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker model |
+| `DA_FINAL_K` | `12` | Messages kept after rerank and sent to the LLM |
+| `DA_POOL_FRACTION` | `0.05` | Candidate pool size as a fraction of the corpus (clamped `DA_POOL_MIN`/`DA_POOL_MAX`) |
 
 ### Choosing the embedding model
 - **Qwen3-Embedding-0.6B** (default): light (~1.2 GB), excellent multilingual (incl. Korean).
@@ -201,4 +210,5 @@ Test both on your real export and keep whichever retrieves the best messages.
 
 ## MVP limits / next steps
 - Manual ingestion (no live Discord connection). Possible next steps: automated
-  fetching, incremental sync, reranking.
+  fetching, incremental sync, hybrid BM25 + dense retrieval, per-channel coverage
+  quotas. (Cross-encoder **reranking is already in** — see *How it works*.)
