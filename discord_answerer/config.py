@@ -46,9 +46,33 @@ CHUNK_MAX_MESSAGES = 12
 CHUNK_OVERLAP_MESSAGES = 3
 CHUNK_TIME_GAP_MINUTES = 30  # split between two distinct conversations
 
-# --- Search ---
-DEFAULT_TOP_K = 60  # multi-channel servers dilute the top-k; pull more candidates
-DEFAULT_SCORE_CUTOFF = 0.35  # trims obvious noise; the real anti-hallucination guard is the LLM
+# --- Retrieval (staged: adaptive cosine pool -> rerank -> constant final_k) ---
+# Stage 1 — candidate POOL (recall). Its size scales with the corpus so the right
+# chunk isn't elbowed out of a fixed top-k by hundreds of cross-channel false
+# friends. pool_size() = clamp(POOL_MIN, n_chunks * POOL_FRACTION, POOL_MAX).
+POOL_FRACTION = float(os.environ.get("DA_POOL_FRACTION", "0.05"))
+POOL_MIN = int(os.environ.get("DA_POOL_MIN", "100"))
+POOL_MAX = int(os.environ.get("DA_POOL_MAX", "2000"))
+# Coarse pre-filter applied on the pool (NOT the fine ranking — the reranker does
+# that). Kept loose: the real anti-hallucination guard is the LLM.
+DEFAULT_SCORE_CUTOFF = 0.35
+
+# Stage 3 — what Gemini actually sees (precision). CONSTANT: does not scale with
+# the corpus, so the context stays tight (no "lost in the middle", strong lock).
+FINAL_K = int(os.environ.get("DA_FINAL_K", "12"))
+
+# Stage 2 — local cross-encoder reranker (precision). Reorders the pool before
+# trimming to FINAL_K. Full local for now (BAAI/bge-reranker-v2-m3, ~568M,
+# multilingual); device auto = CUDA+fp16 / CPU, mirroring embed.py.
+RERANK_ENABLED = os.environ.get("DA_RERANK", "1").strip().lower() not in ("0", "false", "no", "")
+RERANK_MODEL = os.environ.get("DA_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_DEVICE = os.environ.get("DA_RERANK_DEVICE", "").strip()
+
+
+def pool_size(n_chunks: int) -> int:
+    """Adaptive candidate-pool size: clamp(POOL_MIN, n_chunks*POOL_FRACTION, POOL_MAX)."""
+    target = int(n_chunks * POOL_FRACTION)
+    return max(POOL_MIN, min(target, POOL_MAX))
 
 # --- LLM backend (synthesis) ---
 LLM_BACKEND = os.environ.get("DA_LLM_BACKEND", "gemini")  # "gemini" | "ollama"

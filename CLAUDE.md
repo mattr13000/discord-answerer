@@ -43,8 +43,8 @@ Retrieval spans all channels by default (the channel of each cited message is sh
 a "Search in" toggle to narrow to one channel. Grouping never re-embeds: `load_server` just
 `np.vstack`-es the already-saved per-channel matrices and tags each chunk with its channel
 (from that channel's `meta.json`) at load time. Multi-file drag & drop indexes several
-channels at once. Default `top_k` raised 30 -> 60 (slider max 100) since merging channels
-dilutes the top-k.
+channels at once. (Retrieval scaling was since reworked — see "Staged retrieval done" below;
+the old fixed `top_k=60` is gone, replaced by an adaptive pool + reranker + constant `FINAL_K`.)
 
 **Committed (branch `ux+limit-test`):** the multi-channel work + the UX pass + `gemini-3.1`
 default are now committed (`a22fa7f`), and `ARCHITECTURE.md` was added (`2b36fcd`). Backend
@@ -55,6 +55,28 @@ polish is the next job the user flagged ("du boulot sur l'UI a faire"). Things t
 the server selector + per-channel remove buttons, the "Search in" scope radio (whole server
 vs one channel), the multi-file upload progress bar, and the `#channel` tag shown on each
 citation/source.
+
+**Staged retrieval done (browser-validated, 2026-06-29; branch `big-context-optimization`).**
+The single-stage `DEFAULT_TOP_K = 60` was the scaling bottleneck (one knob doubling as both
+candidate handle *and* LLM context; the good chunk got elbowed out at 57k msgs). Replaced by a
+3-stage pipeline: **(1)** `search.py` returns an **adaptive candidate pool** sized to the corpus
+(`config.pool_size(n) = clamp(POOL_MIN 100, n*POOL_FRACTION 0.05, POOL_MAX 2000)`; ~610 at the
+12k-chunk server) — recall. **(2)** `rerank.py` (NEW) runs a **local cross-encoder**
+(`BAAI/bge-reranker-v2-m3`, ~568M, multilingual, CUDA+fp16, mirrors `embed.py`) — precision.
+**(3)** trims to a **constant `FINAL_K = 12`** for Gemini — tight context, strong lock.
+Measured separation on the real server: in-scope chunks rerank to ~0.95, off-topic to ~0.01
+(despite near-identical cosine ~0.35–0.65). New config knobs (`DA_*`): `POOL_FRACTION/MIN/MAX`,
+`FINAL_K`, `RERANK_ENABLED/MODEL/DEVICE`; `DEFAULT_SCORE_CUTOFF` (0.35) is now only a **coarse
+pre-filter** on the pool, not the fine ranking. The Advanced slider is re-semantized as
+"Messages used in the answer" (5–25, def 12) = FINAL_K; the pool is internal/adaptive.
+`synthesize.py` was **NOT** touched — the 3 locks + exact `NOT_FOUND` fallback are intact; we
+just feed it a better packet. Gotcha recorded in code: with sentence-transformers 5.x, set fp16
+via `model_kwargs={"torch_dtype": float16}` at load — mutating `.model.half()` after load breaks
+CrossEncoder's forward dispatch. Rerank load failures **silently fall back** to cosine order
+(no crash, but the precision gain vanishes) → consider pinning ST/transformers in `requirements.txt`.
+*Next passes already scoped (deferred): hybrid BM25, per-channel quota + MMR, query
+routing/decomposition; and a cheap `rerank_score` floor to reject junk pools before Gemini
+(saves an API call on out-of-scope — the 0.95-vs-0.01 gap makes it near-zero-risk).*
 
 **In flight / uncommitted (as of 2026-06-28):** **GPU enablement** — torch swapped to the
 cu126 CUDA build and `embed.py` now runs the model on GPU (device auto + fp16, see
@@ -73,8 +95,9 @@ discord_answerer/
   chunk.py                  # conversation windows (NOT 1 embedding/message)
   embed.py                  # local embeddings (Qwen3-0.6B default, bge-m3 alt); device auto (CUDA+fp16/CPU)
   index_build.py            # build + list_servers/load_server/load_channel + delete (library of servers)
-  search.py                 # cosine top-k (normalized vectors -> dot product)
-  synthesize.py             # bounded LLM synthesis, pluggable backend (gemini/ollama)
+  search.py                 # stage 1: cosine -> adaptive candidate POOL (config.pool_size)
+  rerank.py                 # stage 2: local cross-encoder (bge-reranker-v2-m3); CUDA+fp16; safe fallback
+  synthesize.py             # stage 3: bounded LLM synthesis of FINAL_K chunks, pluggable backend (gemini/ollama)
 data/                       # JSON exports (gitignored except sample_export.json)
 index/                      # generated index library (gitignored)
   <guild_id>/               #   one folder per server (guild)

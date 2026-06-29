@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import streamlit as st
 
 from discord_answerer import config, index_build
+from discord_answerer import rerank as rerank_mod
 from discord_answerer import search as search_mod
 from discord_answerer import synthesize as synth_mod
 
@@ -302,8 +303,9 @@ with st.sidebar:
 
     with st.expander("⚙️ Advanced settings"):
         k = st.slider(
-            "Messages to retrieve", 5, 100, config.DEFAULT_TOP_K, step=5,
-            help="How many Discord messages to pull in before answering.",
+            "Messages used in the answer", 5, 25, config.FINAL_K, step=1,
+            help="How many of the best-matching Discord messages the answer is built "
+            "from. The candidate pool searched beforehand is sized automatically.",
         )
         cutoff = st.slider(
             "Match strictness", 0.0, 1.0, float(config.DEFAULT_SCORE_CUTOFF), 0.05,
@@ -408,9 +410,10 @@ with st.container(key="ask_panel"):
             )
             a_emb, a_chunks, _ = _load_scope(active_key, asked["scope"])
             with st.spinner("🔎 Searching the Discord…"):
-                results = search_mod.search(
-                    question, a_emb, a_chunks, k=asked["k"], cutoff=asked["cutoff"]
-                )
+                # Stage 1: adaptive cosine pool (recall). Stage 2: cross-encoder
+                # rerank trims it to the asked FINAL_K best (precision).
+                pool = search_mod.search(question, a_emb, a_chunks, cutoff=asked["cutoff"])
+                results = rerank_mod.rerank(question, pool, top_k=asked["k"])
 
             with st.chat_message("assistant"):
                 if mode == ANSWER:
