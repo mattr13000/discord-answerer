@@ -73,6 +73,16 @@ _PANEL_CSS = """
 }
 /* Keep the answer + results at a comfortable reading width on wide layout. */
 .st-key-answer_box { max-width: 860px; }
+/* The "Answer ready" status is an st.status (an expander under the hood) used
+   purely as a spinner→checkmark indicator — its body is always empty. Hide the
+   chevron and kill the toggle so it reads as a plain status line, not a dropdown.
+   The spinner/check icon has its own testid (stExpanderIcon*) and is untouched. */
+.st-key-answer_status summary [data-testid="stIconMaterial"] { display: none; }
+.st-key-answer_status summary { cursor: default; pointer-events: none; list-style: none; }
+.st-key-answer_status summary::-webkit-details-marker { display: none; }
+/* Drop the built-in white "complete" check — the label's green ✅ already says it.
+   Keep the running spinner (stExpanderIconSpinner) untouched. */
+.st-key-answer_status [data-testid="stExpanderIconCheck"] { display: none; }
 </style>
 """
 st.markdown(_PANEL_CSS, unsafe_allow_html=True)
@@ -334,7 +344,9 @@ scope = st.radio(
     horizontal=True,
 )
 scope_channel = None if scope == WHOLE else scope
-embeddings, chunks_data, meta = _load_scope(active_key, scope_channel)
+# Live load drives only the caption below; the answer retrieves against the scope
+# frozen at submit time (see the ask panel) so changing category never re-prompts.
+_, _, meta = _load_scope(active_key, scope_channel)
 
 scope_detail = (
     f"{meta.get('num_channels', '?')} channels"
@@ -364,13 +376,41 @@ with st.container(key="ask_panel"):
     # new question is sent.
     question = st.session_state.get("question", "")
 
+    # Input pinned to the TOP of the panel (above the exchange): the user types
+    # and the new answer renders right below — no scrolling down past the sources
+    # to type, then back up to read. st.chat_input draws the send button inside
+    # the text box and submits on Enter or click. Placed inside this container
+    # (not the app root) it renders inline here instead of pinned to the page
+    # bottom. On submit we stash the text and rerun so the new question's bubbles
+    # render immediately, with no one-rerun lag.
+    placeholder = "Ask another question…" if question else "e.g. what is the best end-game build?"
+    prompt = st.chat_input(placeholder)
+    if prompt:
+        # Lock the retrieval settings to THIS question. Streamlit reruns on every
+        # widget click, so without this snapshot, clicking another category (or
+        # nudging an Advanced slider) would re-retrieve against the new scope and
+        # re-prompt the LLM on the answer already on screen. Frozen here, those
+        # widgets instead configure the *next* question.
+        st.session_state["question"] = prompt
+        st.session_state["asked"] = {"scope": scope_channel, "k": k, "cutoff": cutoff}
+        st.rerun()
+
     if question:
         with st.container(key="answer_box"):
             with st.chat_message("user"):
                 st.markdown(question)
 
+            # Retrieve against the settings frozen when the question was sent, not
+            # the live widgets — so toggling scope/sliders afterwards never fires a
+            # new LLM call. Falls back to live settings if state is somehow missing.
+            asked = st.session_state.get(
+                "asked", {"scope": scope_channel, "k": k, "cutoff": cutoff}
+            )
+            a_emb, a_chunks, _ = _load_scope(active_key, asked["scope"])
             with st.spinner("🔎 Searching the Discord…"):
-                results = search_mod.search(question, embeddings, chunks_data, k=k, cutoff=cutoff)
+                results = search_mod.search(
+                    question, a_emb, a_chunks, k=asked["k"], cutoff=asked["cutoff"]
+                )
 
             with st.chat_message("assistant"):
                 if mode == ANSWER:
@@ -387,11 +427,16 @@ with st.container(key="ask_panel"):
                     else:
                         try:
                             sources = tuple((r["link"], r["text"]) for r in results)
-                            with st.status(
-                                "✍️ Reading the Discord and writing your answer…", expanded=False
-                            ) as status:
-                                answer = _synthesize_cached(question, backend, sources)
-                                status.update(label="✅ Answer ready", state="complete")
+                            # Keyed wrapper so the CSS below strips the (always-empty)
+                            # expand chevron from this status, keeping just the
+                            # spinner→checkmark. Nothing is written into the status body.
+                            with st.container(key="answer_status"):
+                                with st.status(
+                                    "✍️ Reading the Discord and writing your answer…",
+                                    expanded=False,
+                                ) as status:
+                                    answer = _synthesize_cached(question, backend, sources)
+                                    status.update(label="✅ Answer ready", state="complete")
                             st.caption("Hover a [Message N] citation to preview its source message.")
                             st.markdown(_answer_with_tooltips(answer, results), unsafe_allow_html=True)
                         except Exception as e:  # noqa: BLE001
@@ -422,15 +467,3 @@ with st.container(key="ask_panel"):
                             )
                             st.text(r["text"])
                             st.divider()
-
-    # st.chat_input draws the send button *inside* the text box and submits on
-    # Enter or click. Placed inside this container (not the app root) it renders
-    # inline instead of pinned to the page bottom, and after the bubbles so it
-    # sits below the current exchange (chat convention). On submit we stash the
-    # text and rerun so the new question's bubbles render immediately, with no
-    # one-rerun lag.
-    placeholder = "Ask another question…" if question else "e.g. what is the best end-game build?"
-    prompt = st.chat_input(placeholder)
-    if prompt:
-        st.session_state["question"] = prompt
-        st.rerun()
