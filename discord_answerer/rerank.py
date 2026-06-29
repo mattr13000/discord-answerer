@@ -53,6 +53,16 @@ def _get_model():
     return _model
 
 
+def fallback_active() -> bool:
+    """True if reranking is enabled but the model couldn't load.
+
+    In that state `rerank` silently returns the coarse cosine order, so the
+    precision pass is effectively off — the UI uses this to warn the user once
+    instead of letting answer quality drop with no signal. Cheap to call: the
+    model load is attempted once and memoized (success or failure)."""
+    return config.RERANK_ENABLED and _get_model() is None
+
+
 def rerank(query, chunks, top_k=None):
     """Reorder `chunks` by cross-encoder relevance to `query`, keep the best `top_k`.
 

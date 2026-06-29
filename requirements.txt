@@ -1,5 +1,13 @@
-streamlit>=1.40
-sentence-transformers>=3.0
-numpy>=1.26
-google-genai>=0.3
-# Backend LLM local (Ollama) : pas de dépendance Python, simple appel HTTP via stdlib.
+# Pins use validated majors: loose floors previously risked pulling a
+# sentence-transformers version whose CrossEncoder fp16 path differs, silently
+# degrading reranking to cosine order (see rerank.py / embed.py fp16 notes).
+streamlit>=1.46,<2            # st.context.theme (1.46), st.toast
+sentence-transformers>=5.0,<6 # 5.x: fp16 set via model_kwargs at load (see rerank.py)
+transformers>=4.50,<6         # backs sentence-transformers; capped before next major
+numpy>=1.26,<3
+google-genai>=1.0,<3          # modern client API: genai.Client(...).models.generate_content
+# torch is pulled in by sentence-transformers; declared so it's explicit. This
+# floor installs the CPU build. For GPU, install the CUDA build instead, e.g.:
+#   pip install torch>=2.2 --index-url https://download.pytorch.org/whl/cu126
+torch>=2.2
+# Local LLM backend (Ollama): no Python dependency — a plain HTTP call via stdlib.

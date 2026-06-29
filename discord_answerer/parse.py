@@ -1,12 +1,28 @@
 """Reads a DiscordChatExporter export (JSON format).
 
 Expected structure: a root object with `guild{id,name}`, `channel{id,name}`,
-`messages[]`. Each message: `id`, `timestamp`, `content`, `author{name,nickname}`,
-`reference{messageId}` (for replies).
+`messages[]`. Each message: `id`, `timestamp`, `content`, `author{name,nickname}`.
 """
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+
+
+def parse_timestamp(ts: str):
+    """ISO-8601 timestamp -> aware datetime, or None if absent/unparseable.
+
+    Shared by chunking (time-gap segmentation) and parsing (chronological sort)
+    so the two never drift. Naive timestamps are assumed UTC so all results are
+    comparable.
+    """
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -15,7 +31,6 @@ class Message:
     timestamp: str
     author: str
     content: str
-    reply_to: str | None
 
 
 @dataclass
@@ -41,17 +56,20 @@ def parse_export(path) -> ParsedExport:
             continue  # MVP: skip attachment/embed-only messages
         author = m.get("author") or {}
         author_name = author.get("nickname") or author.get("name") or "unknown"
-        ref = m.get("reference") or {}
-        reply_to = ref.get("messageId")
         messages.append(
             Message(
                 id=str(m.get("id")),
                 timestamp=m.get("timestamp", ""),
                 author=author_name,
                 content=content,
-                reply_to=str(reply_to) if reply_to else None,
             )
         )
+
+    # Chunking assumes chronological order to split on time gaps. Exports are
+    # normally already ascending, but sort defensively (stable: messages with no
+    # timestamp keep their relative position) so one out-of-order export can't
+    # silently corrupt chunk boundaries.
+    messages.sort(key=lambda m: parse_timestamp(m.timestamp) or datetime.min.replace(tzinfo=timezone.utc))
 
     return ParsedExport(
         guild_id=str(guild.get("id", "")),

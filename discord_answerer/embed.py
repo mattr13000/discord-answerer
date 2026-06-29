@@ -31,6 +31,10 @@ def _get_model():
         _model = SentenceTransformer(config.EMBED_MODEL, device=device)
         # fp16 on GPU: ~2x less VRAM (leaves headroom for other GPU work) and faster,
         # with no meaningful quality loss for retrieval. Skip on CPU (no fp16 speedup).
+        # NB: post-load `.half()` is safe for SentenceTransformer (bi-encoder), but
+        # NOT for the CrossEncoder in rerank.py — there it breaks the forward
+        # dispatch under sentence-transformers 5.x, so that path sets fp16 via
+        # model_kwargs at load instead. Keep the two in sync if you refactor.
         if device == "cuda":
             _model = _model.half()
     return _model

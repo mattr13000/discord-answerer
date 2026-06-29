@@ -18,7 +18,15 @@ def search(query, embeddings, chunks_data, k=None, cutoff=None):
 
     qvec = embed.embed_query(query)
     scores = embeddings @ qvec
-    order = np.argsort(-scores)[:k]
+
+    # Top-k via partial selection (O(n)) then sort only those k, instead of fully
+    # sorting the whole corpus on every query — this is the hot path as the index
+    # scales to tens of thousands of chunks.
+    k = min(k, len(scores))
+    if k <= 0:
+        return []
+    top = np.argpartition(-scores, k - 1)[:k]
+    order = top[np.argsort(-scores[top])]
 
     results = []
     for idx in order:

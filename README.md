@@ -183,6 +183,18 @@ streamlit run app.py
 ```
 -> http://localhost:8501 — point to your export, click **(Re)index**, ask away.
 
+### Or from the command line (no UI)
+
+The same pipeline is available headless — handy for scripting or quick checks:
+
+```bash
+python -m discord_answerer build data/export.json          # index an export
+python -m discord_answerer servers                         # list indexed servers + their ids
+python -m discord_answerer ask "best end-game build?" --guild <id> [--channel <id>] [--show-sources]
+```
+
+`ask` needs a Gemini key (or `--backend ollama`); `build`/`servers` need no key.
+
 ---
 
 ## Configuration (environment variables)
@@ -199,6 +211,7 @@ streamlit run app.py
 | `DA_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker model |
 | `DA_FINAL_K` | `12` | Messages kept after rerank and sent to the LLM |
 | `DA_POOL_FRACTION` | `0.05` | Candidate pool size as a fraction of the corpus (clamped `DA_POOL_MIN`/`DA_POOL_MAX`) |
+| `DA_SCORE_CUTOFF` | `0.35` | Coarse cosine pre-filter on the pool (not the fine ranking — the reranker does that) |
 
 ### Choosing the embedding model
 - **Qwen3-Embedding-0.6B** (default): light (~1.2 GB), excellent multilingual (incl. Korean).
