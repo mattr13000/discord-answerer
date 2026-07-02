@@ -227,6 +227,20 @@ def load_server(guild_id):
     if not mats:
         raise FileNotFoundError(f"No indexed channel for server {guild_id!r}.")
 
+    # Vectors from different embedding models live in incompatible spaces; stacking
+    # them would either crash on a dim mismatch or, worse, silently rank garbage.
+    # (Happens when DA_EMBED_MODEL changed between two channel builds.)
+    models = {str(c.get("embed_model")) for c in channels if c.get("embed_model")}
+    if len(models) > 1:
+        detail = "; ".join(
+            f"#{c.get('channel_name', '?')}: {c.get('embed_model', '?')}" for c in channels
+        )
+        raise ValueError(
+            f"Channels of server {guild_id!r} were indexed with different embedding "
+            f"models ({detail}). Their vectors are not comparable — remove and "
+            "re-index the outdated channels so the whole server uses one model."
+        )
+
     embeddings = np.vstack(mats)
     server_meta = {
         "guild_id": str(guild_id),

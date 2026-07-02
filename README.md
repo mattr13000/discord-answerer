@@ -86,8 +86,10 @@ Opens http://localhost:8501 → point to your JSON in the sidebar, click **(Re)i
 JSON export (DiscordChatExporter)
    -> parse -> chunking into conversation windows
    -> local embeddings (Qwen3-Embedding-0.6B)
-   -> numpy index -> cosine search: adaptive candidate pool (recall)
-   -> local cross-encoder rerank (bge-reranker-v2-m3) -> top messages (precision)
+   -> numpy index -> hybrid recall: dense cosine + BM25, fused by RRF (adaptive pool)
+   -> local cross-encoder rerank (bge-reranker-v2-m3) -> precision
+   -> junk-pool floor: off-topic? -> "Not found in the Discord." (no LLM call)
+   -> diversify: MMR + per-channel quota -> top messages
    -> bounded LLM synthesis (Gemini free tier / local Ollama)
    -> answer + Discord links of the cited messages
 ```
@@ -195,6 +197,16 @@ python -m discord_answerer ask "best end-game build?" --guild <id> [--channel <i
 
 `ask` needs a Gemini key (or `--backend ollama`); `build`/`servers` need no key.
 
+### Running the tests (contributors)
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The suite stubs the embedding and reranking models, so it runs in under a second
+and downloads nothing.
+
 ---
 
 ## Configuration (environment variables)
@@ -209,9 +221,16 @@ python -m discord_answerer ask "best end-game build?" --guild <id> [--channel <i
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `DA_RERANK` | `1` | Cross-encoder reranker on/off (`0` = plain cosine) |
 | `DA_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Reranker model |
+| `DA_RERANK_FLOOR` | `0.05` | Min top `rerank_score`; below it the pool is off-topic → `Not found` with no LLM call (`0` = disable) |
 | `DA_FINAL_K` | `12` | Messages kept after rerank and sent to the LLM |
 | `DA_POOL_FRACTION` | `0.05` | Candidate pool size as a fraction of the corpus (clamped `DA_POOL_MIN`/`DA_POOL_MAX`) |
-| `DA_SCORE_CUTOFF` | `0.35` | Coarse cosine pre-filter on the pool (not the fine ranking — the reranker does that) |
+| `DA_SCORE_CUTOFF` | `0.35` | Coarse cosine pre-filter on the **dense** side of the pool (BM25 can still rescue a low-cosine exact match) |
+| `DA_HYBRID` | `1` | Fuse BM25 with dense retrieval via RRF (`0` = dense only) |
+| `DA_RRF_K` | `60` | RRF damping constant (larger = flatter rank weighting) |
+| `DA_BM25_K1` / `DA_BM25_B` | `1.5` / `0.75` | BM25 term-saturation / length-normalization |
+| `DA_DIVERSITY` | `1` | MMR + per-channel quota on the final set (`0` = pure rerank order) |
+| `DA_MMR_LAMBDA` | `0.7` | MMR relevance↔diversity trade-off (`1` = relevance only) |
+| `DA_CHANNEL_FRACTION` | `0.5` | Max share of the answer one channel may take (relaxed if needed) |
 
 ### Choosing the embedding model
 - **Qwen3-Embedding-0.6B** (default): light (~1.2 GB), excellent multilingual (incl. Korean).
@@ -223,5 +242,10 @@ Test both on your real export and keep whichever retrieves the best messages.
 
 ## MVP limits / next steps
 - Manual ingestion (no live Discord connection). Possible next steps: automated
-  fetching, incremental sync, hybrid BM25 + dense retrieval, per-channel coverage
-  quotas. (Cross-encoder **reranking is already in** — see *How it works*.)
+  fetching, incremental sync, query routing/decomposition. (Cross-encoder
+  **reranking**, **hybrid BM25 + dense**, the **junk-pool floor**, and **per-channel
+  quota + MMR** are all already in — see *How it works*.)
+- **Prompt injection from the corpus**: a Discord message can itself contain
+  instruction-like text ("ignore your rules…"). The prompts explicitly treat message
+  content as data, never instructions, which mitigates but cannot fully eliminate
+  this — treat exports from untrusted communities accordingly.
