@@ -54,8 +54,19 @@ POOL_FRACTION = float(os.environ.get("DA_POOL_FRACTION", "0.05"))
 POOL_MIN = int(os.environ.get("DA_POOL_MIN", "100"))
 POOL_MAX = int(os.environ.get("DA_POOL_MAX", "2000"))
 # Coarse pre-filter applied on the pool (NOT the fine ranking — the reranker does
-# that). Kept loose: the real anti-hallucination guard is the LLM.
+# that). Kept loose: the real anti-hallucination guard is the LLM. In hybrid mode
+# this filters the DENSE side only — a low-cosine chunk can still be rescued by BM25.
 DEFAULT_SCORE_CUTOFF = float(os.environ.get("DA_SCORE_CUTOFF", "0.35"))
+
+# Stage 1b — lexical BM25 signal fused with the dense pool (recall). Dense
+# embeddings miss exact tokens (item/skill/boss names, patch numbers like "+9 STR")
+# that dominate a game Discord; BM25 catches them. The two rankings are combined by
+# Reciprocal Rank Fusion (RRF): fused(d) = sum_r 1 / (RRF_K + rank_r(d)). No new
+# dependency — BM25 is implemented in-repo (lexical.py), numpy-only.
+HYBRID_ENABLED = os.environ.get("DA_HYBRID", "1").strip().lower() not in ("0", "false", "no", "")
+RRF_K = int(os.environ.get("DA_RRF_K", "60"))  # RRF damping; larger = flatter rank weighting
+BM25_K1 = float(os.environ.get("DA_BM25_K1", "1.5"))  # term-frequency saturation
+BM25_B = float(os.environ.get("DA_BM25_B", "0.75"))  # document-length normalization
 
 # Stage 3 — what Gemini actually sees (precision). CONSTANT: does not scale with
 # the corpus, so the context stays tight (no "lost in the middle", strong lock).
@@ -67,6 +78,24 @@ FINAL_K = int(os.environ.get("DA_FINAL_K", "12"))
 RERANK_ENABLED = os.environ.get("DA_RERANK", "1").strip().lower() not in ("0", "false", "no", "")
 RERANK_MODEL = os.environ.get("DA_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANK_DEVICE = os.environ.get("DA_RERANK_DEVICE", "").strip()
+# Junk-pool floor: if the BEST chunk's rerank_score is below this, the whole pool is
+# treated as off-topic and retrieval returns [] -> exact NOT_FOUND, no LLM call. The
+# measured separation is wide (in-scope ~0.95, off-topic ~0.01), so 0.05 is a
+# conservative cut that strengthens the lock without risking in-scope answers. Only
+# applied when the reranker actually ran (cosine-fallback path keeps current behaviour).
+# Set DA_RERANK_FLOOR=0 to disable.
+RERANK_FLOOR = float(os.environ.get("DA_RERANK_FLOOR", "0.05"))
+
+# Stage 2b — result diversification (precision/coverage). Picks the FINAL_K answer set
+# from the reranked pool with (a) Maximal Marginal Relevance to drop near-duplicate
+# chunks and (b) a per-channel quota so one chatty channel can't monopolize the answer.
+DIVERSITY_ENABLED = os.environ.get("DA_DIVERSITY", "1").strip().lower() not in ("0", "false", "no", "")
+# MMR trade-off: score = MMR_LAMBDA*relevance - (1-MMR_LAMBDA)*max_similarity_to_picked.
+# 1.0 = pure relevance (no diversity), 0.0 = pure diversity. 0.7 leans on relevance.
+MMR_LAMBDA = float(os.environ.get("DA_MMR_LAMBDA", "0.7"))
+# Max share of the FINAL_K answer one channel may take (cap = ceil(k * fraction)).
+# Relaxed automatically when the pool can't otherwise fill k (e.g. single-channel scope).
+PER_CHANNEL_FRACTION = float(os.environ.get("DA_CHANNEL_FRACTION", "0.5"))
 
 
 def pool_size(n_chunks: int) -> int:

@@ -74,9 +74,51 @@ just feed it a better packet. Gotcha recorded in code: with sentence-transformer
 via `model_kwargs={"torch_dtype": float16}` at load — mutating `.model.half()` after load breaks
 CrossEncoder's forward dispatch. Rerank load failures **silently fall back** to cosine order
 (no crash, but the precision gain vanishes) → consider pinning ST/transformers in `requirements.txt`.
-*Next passes already scoped (deferred): hybrid BM25, per-channel quota + MMR, query
-routing/decomposition; and a cheap `rerank_score` floor to reject junk pools before Gemini
-(saves an API call on out-of-scope — the 0.95-vs-0.01 gap makes it near-zero-risk).*
+
+**Hybrid + floor + diversify done (logic-validated 2026-06-30; browser pass pending).** The three
+deferred retrieval passes are now shipped, all behind `DA_*` env flags (default ON), with
+`synthesize.py` and `app.py` **untouched** (the floor surfaces via app's existing `if not results
+-> NOT_FOUND`). **(#1) Junk-pool floor** (`query._below_floor`): if the best `rerank_score` <
+`RERANK_FLOOR` (0.05) the pool is off-topic → `retrieve` returns `[]` → exact `NOT_FOUND`, **no
+Gemini call**. Only fires when the reranker actually ran (cosine-fallback path has no
+`rerank_score`, keeps old behaviour). **(#2) Hybrid BM25** (`lexical.py`, in-repo numpy-only BM25
+Okapi, **no new dependency**; memoised per scope by `id(chunks_data)`+len): dense + BM25 fused by
+**RRF** in `search.py`; the `0.35` cosine cutoff now filters the **dense side only**, so a
+low-cosine exact-token match (item/skill/boss name, "+9 STR") is *rescued* by BM25. **(#3) MMR +
+per-channel quota** (`diversify.py`): picks `FINAL_K` from the *whole* reranked pool by
+`λ·rel − (1−λ)·max_sim` (λ=0.7, sim via each item's `_row` into the embedding matrix) under a
+per-channel cap `ceil(k·0.5)`, relaxed when the pool can't otherwise fill `k` (single-channel
+scope). `query.retrieve` now reranks the **whole pool** when diversify is on (was: straight to
+`FINAL_K`). New knobs: `DA_RERANK_FLOOR`, `DA_HYBRID`, `DA_RRF_K`, `DA_BM25_K1/B`, `DA_DIVERSITY`,
+`DA_MMR_LAMBDA`, `DA_CHANNEL_FRACTION`. Validated by an offline scratchpad script (BM25 ranking,
+RRF rescue, MMR de-dup, quota + relaxation, floor, end-to-end `retrieve`) that monkeypatches
+`embed_query`/`rerank` so no model loads — **the in-browser pass on the real server is still the
+user's to run** (in-scope answer, exact-name BM25 rescue, off-topic instant NOT_FOUND, no
+single-channel domination). New knobs are env-only by decision; UI exposure is a later pass.
+*Still open: query routing/decomposition; per-corpus BM25 weight tuning. **#5 (dev/"noob"
+distribution split) is deferred** to its own pass — see [[distribution-model-two-audiences]].*
+
+**Review-fixes pass + test suite (2026-07-02; branch `many-fixes`).** A code-review sweep
+fixed: **(a)** `app.py` now freezes the **guild** into the `asked` snapshot too (switching
+the active server with an answer on screen used to re-fire retrieval/LLM against the new
+corpus, or crash on a stale channel id); **(b)** `diversify.py` uses **positional relevance**
+(incoming-order rank) instead of raw cosine on the reranker-fallback path — raw cosine
+silently undid the BM25 rescue by demoting exactly the low-cosine rescued chunks;
+**(c)** `lexical.py`'s BM25 memo is now an **identity-pinned LRU** (cached entry holds the
+chunk list itself, `is`-checked — a recycled `id()` can no longer produce a stale index);
+**(d)** `load_server` **rejects mixed embedding models** across channels with an actionable
+error; **(e)** prompt-injection hardening: system prompt + `build_prompt` declare message
+content *data, never instructions* (locks intact, only strengthened); **(f)** `_gemini`
+raises on an **empty answer** (safety block) instead of rendering a silent blank, with a
+friendly UI message; **(g)** a pasted Gemini key lives in `st.session_state`, **not**
+`os.environ` (process-global env would leak the key across sessions if ever hosted) —
+`synthesize()` grew an optional `api_key` param for this; **(h)** the internal `_row` key is
+stripped from `retrieve()` results; **(i)** the cutoff slider tooltip says it's dense-only.
+**Tests:** `tests/` (pytest, `requirements-dev.txt`) — 35 tests covering BM25/RRF rescue,
+MMR/quota/relaxation/fallback-relevance, floor, parse/chunk, index library incl. the
+mixed-model guard, and the exact NOT_FOUND lock; `embed_query`/`rerank` are monkeypatched
+(no model loads, <1s) and config knobs are pinned per-test so `DA_*` env can't skew runs.
+Browser pass on these UI-visible bits (frozen guild, session key) is still the user's to run.
 
 **In flight / uncommitted (as of 2026-06-28):** **GPU enablement** — torch swapped to the
 cu126 CUDA build and `embed.py` now runs the model on GPU (device auto + fp16, see
@@ -91,15 +133,18 @@ gemini-2.5->3.1). Plus other working-tree edits to `app.py`/`index_build.py`/`sy
 app.py                      # Streamlit UI (Raw + LLM modes); wraps query.* in st caches
 discord_answerer/
   __main__.py               # CLI: python -m discord_answerer {build,servers,ask} (same pipeline, headless)
-  query.py                  # pipeline orchestration: retrieve (search->rerank) + ask (load->retrieve->synthesize)
+  query.py                  # pipeline orchestration: retrieve (search->rerank->floor->diversify) + ask (load->retrieve->synthesize)
   config.py                 # everything overridable via env var; loads .env
   parse.py                  # DiscordChatExporter JSON -> normalized messages (sorted; parse_timestamp shared w/ chunk)
   chunk.py                  # conversation windows (NOT 1 embedding/message)
   embed.py                  # local embeddings (Qwen3-0.6B default, bge-m3 alt); device auto (CUDA+fp16/CPU)
   index_build.py            # build + list_servers/load_server/load_channel + delete (library of servers)
-  search.py                 # stage 1: cosine -> adaptive candidate POOL (argpartition top-k; config.pool_size)
+  search.py                 # stage 1: dense cosine + BM25, fused by RRF -> adaptive candidate POOL (config.pool_size)
+  lexical.py                # stage 1b: in-repo BM25 Okapi (inverted index, numpy-only, memoised); top_n()
   rerank.py                 # stage 2: local cross-encoder (bge-reranker-v2-m3); CUDA+fp16; safe fallback + fallback_active()
+  diversify.py              # stage 2b: MMR + per-channel quota -> the diverse, de-duped FINAL_K; select()
   synthesize.py             # stage 3: bounded LLM synthesis of FINAL_K chunks, pluggable backend (gemini/ollama)
+tests/                      # pytest suite (models stubbed, <1s; pip install -r requirements-dev.txt)
 data/                       # JSON exports (gitignored except sample_export.json)
 index/                      # generated index library (gitignored)
   <guild_id>/               #   one folder per server (guild)
@@ -158,4 +203,6 @@ untouched via negative lookahead). Known limit: a citation at the very top of an
 ## Possible next steps
 - Drag & drop currently writes the upload to a temp file then calls `build_index`; the
   `data/` path-based flow is gone from the UI (CLI build still works).
-- Bigger ideas: automated fetching / incremental sync, reranking, multi-channel per guild.
+- Bigger ideas: automated fetching / incremental sync, query routing/decomposition,
+  patch-obsolescence (recency/version) filtering, and a dev-vs-"noob" distribution split
+  (#5, deferred). (Reranking, multi-channel, hybrid BM25, junk-pool floor and MMR+quota are done.)

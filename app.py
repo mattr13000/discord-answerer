@@ -145,7 +145,8 @@ def _display_score(r) -> float:
 def _friendly_error(exc, backend: str) -> str:
     """Turn a raw exception into a calm, actionable message for non-tech users."""
     msg = str(exc)
-    if backend == "ollama" and ("Cannot reach Ollama" in msg or "urlopen" in msg.lower()):
+    low = msg.lower()
+    if backend == "ollama" and ("Cannot reach Ollama" in msg or "urlopen" in low):
         return (
             "Couldn't reach the local Ollama server. Make sure Ollama is running "
             "and the model is installed — or switch the answer engine back to "
@@ -156,7 +157,11 @@ def _friendly_error(exc, backend: str) -> str:
             "The Gemini API key seems missing or invalid. Add a valid free key in "
             "the left panel (step 3) — [get one here](https://aistudio.google.com/apikey)."
         )
-    low = msg.lower()
+    if "empty answer" in low:
+        return (
+            "🤐 The model returned an empty answer (it may have been blocked). "
+            "Try rephrasing the question."
+        )
     if "429" in msg or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
         return (
             "⏳ The free Gemini quota / rate limit was hit. Wait a minute and try "
@@ -167,8 +172,8 @@ def _friendly_error(exc, backend: str) -> str:
 
 
 @st.cache_data(show_spinner=False, max_entries=512)
-def _synthesize_cached(question: str, backend: str, sources: tuple) -> str:
-    """Cache LLM answers by (question, backend, retrieved sources).
+def _synthesize_cached(question: str, backend: str, sources: tuple, api_key: str | None) -> str:
+    """Cache LLM answers by (question, backend, retrieved sources, key).
 
     Spamming Send, or any rerun (toggling a display option, moving a slider),
     re-executes the script — but an identical request is served from cache
@@ -176,7 +181,7 @@ def _synthesize_cached(question: str, backend: str, sources: tuple) -> str:
     not cached, so a 429/quota error still surfaces normally.
     """
     chunks = [{"link": link, "text": text} for link, text in sources]
-    return synth_mod.synthesize(question, chunks, backend=backend)
+    return synth_mod.synthesize(question, chunks, backend=backend, api_key=api_key)
 
 
 @st.cache_data(show_spinner=False, max_entries=256)
@@ -310,9 +315,13 @@ with st.sidebar:
                 st.rerun()
 
     # Step 3 — Gemini key (needed for AI answers only). Folded once a key is set
-    # (env var or already pasted), shown plainly otherwise.
+    # (env var or already pasted), shown plainly otherwise. A pasted key lives in
+    # st.session_state — per browser session, never in os.environ: mutating the
+    # process-global environment would leak one user's key to every session if the
+    # app were ever hosted.
     has_env_key = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    if has_env_key:
+    has_key = has_env_key or bool(st.session_state.get("gemini_key"))
+    if has_key:
         key_ctx = st.expander("🔑 AI key · active ✓")
     else:
         st.markdown("**3 · AI answer key**")
@@ -321,12 +330,14 @@ with st.sidebar:
         key_input = st.text_input(
             "Gemini API key",
             type="password",
-            placeholder="Already set ✓" if has_env_key else "Paste your free key here",
-            help="Free, no credit card. Needed only for AI answers — not for browsing.",
+            placeholder="Already set ✓" if has_key else "Paste your free key here",
+            help="Free, no credit card. Needed only for AI answers — not for browsing. "
+            "Kept for this browser session only, never written to disk.",
         )
         if key_input:
-            os.environ["GEMINI_API_KEY"] = key_input.strip()
-        key_ready = has_env_key or bool(key_input)
+            st.session_state["gemini_key"] = key_input.strip()
+        session_key = st.session_state.get("gemini_key") or None
+        key_ready = has_env_key or bool(session_key)
         if not key_ready:
             st.caption("🔑 No key yet → [get a free one](https://aistudio.google.com/apikey)")
 
@@ -338,7 +349,9 @@ with st.sidebar:
         )
         cutoff = st.slider(
             "Match strictness", 0.0, 1.0, float(config.DEFAULT_SCORE_CUTOFF), 0.05,
-            help="Higher = keep only very close matches.",
+            help="Higher = keep only very close matches. Applies to meaning-based "
+            "matching only — messages containing your exact words (item or boss "
+            "names…) can still be used.",
         )
         backend = st.selectbox(
             "Answer engine", options=["gemini", "ollama"],
@@ -421,9 +434,13 @@ with st.container(key="ask_panel"):
         # widget click, so without this snapshot, clicking another category (or
         # nudging an Advanced slider) would re-retrieve against the new scope and
         # re-prompt the LLM on the answer already on screen. Frozen here, those
-        # widgets instead configure the *next* question.
+        # widgets instead configure the *next* question. The guild is frozen too:
+        # switching the active server must not re-run the on-screen question
+        # against the new corpus (or crash loading the old channel id under it).
         st.session_state["question"] = prompt
-        st.session_state["asked"] = {"scope": scope_channel, "k": k, "cutoff": cutoff}
+        st.session_state["asked"] = {
+            "guild": active_key, "scope": scope_channel, "k": k, "cutoff": cutoff,
+        }
         st.rerun()
 
     if question:
@@ -435,14 +452,18 @@ with st.container(key="ask_panel"):
             # the live widgets — so toggling scope/sliders afterwards never fires a
             # new LLM call. Falls back to live settings if state is somehow missing.
             asked = st.session_state.get(
-                "asked", {"scope": scope_channel, "k": k, "cutoff": cutoff}
+                "asked", {"guild": active_key, "scope": scope_channel, "k": k, "cutoff": cutoff}
             )
             with st.spinner("🔎 Searching the Discord…"):
                 # Stage 1: adaptive cosine pool (recall). Stage 2: cross-encoder
                 # rerank trims it to the asked FINAL_K best (precision). Cached by
-                # (question, scope, k, cutoff) so reruns don't re-fire the GPU.
+                # (question, guild, scope, k, cutoff) so reruns don't re-fire the GPU.
                 results = _retrieve_cached(
-                    question, active_key, asked["scope"], asked["k"], asked["cutoff"]
+                    question,
+                    asked.get("guild", active_key),
+                    asked["scope"],
+                    asked["k"],
+                    asked["cutoff"],
                 )
             # Reranker unavailable -> retrieval silently fell back to cosine order.
             # Warn once so the quality drop isn't invisible (see rerank.fallback_active).
@@ -476,7 +497,7 @@ with st.container(key="ask_panel"):
                                     "✍️ Reading the Discord and writing your answer…",
                                     expanded=False,
                                 ) as status:
-                                    answer = _synthesize_cached(question, backend, sources)
+                                    answer = _synthesize_cached(question, backend, sources, session_key)
                                     status.update(label="✅ Answer ready", state="complete")
                             st.caption("Hover a [Message N] citation to preview its source message.")
                             st.markdown(_answer_with_tooltips(answer, results), unsafe_allow_html=True)
