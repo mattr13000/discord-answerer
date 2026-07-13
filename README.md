@@ -1,8 +1,7 @@
 # Discord Answerer
 
-Ask a natural-language question about a **very niche** game Discord server
-(private-server MMO, old Korean games, FR/Dofus communities…) and get a
-**synthesized answer** built **only** from that Discord's messages.
+Ask a natural-language question about a Discord server
+and get a **synthesized answer** built **only** from that Discord's messages.
 
 > **Core constraint: 0 web, 0 assumption.** If the info isn't in the Discord, the app
 > answers `Not found in the Discord.` — it will never make something up or look
